@@ -1,3 +1,4 @@
+use crate::types::DebugPrinter;
 use crate::{cost_model::transferred_byte_cycles, syscalls::DEBUG_PRINT_SYSCALL_NUMBER};
 use ckb_types::packed::Byte32;
 use ckb_vm::{
@@ -5,18 +6,18 @@ use ckb_vm::{
     Error as VMError, Memory, Register, SupportMachine, Syscalls,
 };
 
-pub struct Debugger<'a> {
+pub struct Debugger {
     hash: Byte32,
-    printer: &'a dyn Fn(&Byte32, &str),
+    printer: DebugPrinter,
 }
 
-impl<'a> Debugger<'a> {
-    pub fn new(hash: Byte32, printer: &'a dyn Fn(&Byte32, &str)) -> Debugger<'a> {
+impl Debugger {
+    pub fn new(hash: Byte32, printer: DebugPrinter) -> Debugger {
         Debugger { hash, printer }
     }
 }
 
-impl<'a, Mac: SupportMachine> Syscalls<Mac> for Debugger<'a> {
+impl<Mac: SupportMachine> Syscalls<Mac> for Debugger {
     fn initialize(&mut self, _machine: &mut Mac) -> Result<(), VMError> {
         Ok(())
     }
@@ -42,8 +43,9 @@ impl<'a, Mac: SupportMachine> Syscalls<Mac> for Debugger<'a> {
             addr += 1;
         }
 
-        machine.add_cycles(transferred_byte_cycles(buffer.len() as u64))?;
-        let s = String::from_utf8(buffer).map_err(|_| VMError::ParseError)?;
+        machine.add_cycles_no_checking(transferred_byte_cycles(buffer.len() as u64))?;
+        let s = String::from_utf8(buffer)
+            .map_err(|e| VMError::External(format!("String from buffer {e:?}")))?;
         (self.printer)(&self.hash, s.as_str());
 
         Ok(true)

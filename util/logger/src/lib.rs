@@ -1,17 +1,14 @@
-use ansi_term::{self, Colour};
-use backtrace::Backtrace;
-use chrono::prelude::{DateTime, Local};
-use crossbeam_channel::unbounded;
-use env_logger::filter::{Builder, Filter};
-use lazy_static::lazy_static;
-use log::{LevelFilter, Log, Metadata, Record};
-use parking_lot::Mutex;
-use regex::Regex;
-use serde_derive::{Deserialize, Serialize};
-use std::io::Write;
-use std::path::PathBuf;
-use std::{fs, panic, thread};
-
+//! CKB logging facade.
+//!
+//! This crate is a wrapper of the crate [`log`].
+//!
+//! [`log`]: https://docs.rs/log/*/log/index.html
+//!
+//! The major issue of the crate `log` is that the macro like
+//! `trace!(target: "global", "message")` is unfriendly to `cargo fmt`. So this
+//! crate disallow using `target: ` in the basic logging macros and add another
+//! group of macros to support both target and message, for example,
+//! `trace_target!("global", "message")`.
 pub use log::{self as internal, Level, SetLoggerError};
 
 #[doc(hidden)]
@@ -22,48 +19,180 @@ macro_rules! env {
     }
 }
 
+/// Logs a message at the trace level using the default target.
+///
+/// This macro logs the message using the default target, the module path of
+/// the location of the log request. See [`trace_target!`] which can override the
+/// target.
+///
+/// [`trace_target!`]: macro.trace_target.html
+///
+/// # Examples
+///
+/// ```
+/// use ckb_logger::trace;
+///
+/// # struct Position { x: f32, y: f32 }
+/// let pos = Position { x: 3.234, y: -1.223 };
+///
+/// trace!("Position is: x: {}, y: {}", pos.x, pos.y);
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! trace {
     ($( $args:tt )*) => {
-        $crate::internal::trace!(target: $crate::env!("CARGO_PKG_NAME"), $( $args )*);
+        $crate::internal::trace!($( $args )*);
     }
 }
 
+/// Logs a message at the debug level using the default target.
+///
+/// This macro logs the message using the default target, the module path of
+/// the location of the log request. See [`debug_target!`] which can override the
+/// target.
+///
+/// [`debug_target!`]: macro.debug_target.html
+///
+/// # Examples
+///
+/// ```
+/// use ckb_logger::debug;
+///
+/// # struct Position { x: f32, y: f32 }
+/// let pos = Position { x: 3.234, y: -1.223 };
+///
+/// debug!("Position is: x: {}, y: {}", pos.x, pos.y);
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! debug {
     ($( $args:tt )*) => {
-        $crate::internal::debug!(target: $crate::env!("CARGO_PKG_NAME"), $( $args )*);
+        $crate::internal::debug!($( $args )*);
     }
 }
 
+/// Logs a message at the info level using the default target.
+///
+/// This macro logs the message using the default target, the module path of
+/// the location of the log request. See [`info_target!`] which can override the
+/// target.
+///
+/// [`info_target!`]: macro.info_target.html
+///
+/// # Examples
+///
+/// ```
+/// use ckb_logger::info;
+///
+/// # struct Connection { port: u32, speed: f32 }
+/// let conn_info = Connection { port: 40, speed: 3.20 };
+///
+/// info!("Connected to port {} at {} Mb/s", conn_info.port, conn_info.speed);
+/// info!(target: "connection_events", "Successful connection, port: {}, speed: {}",
+///       conn_info.port, conn_info.speed);
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! info {
     ($( $args:tt )*) => {
-        $crate::internal::info!(target: $crate::env!("CARGO_PKG_NAME"), $( $args )*);
+        $crate::internal::info!($( $args )*);
     }
 }
 
+/// Logs a message at the warn level using the default target.
+///
+/// This macro logs the message using the default target, the module path of
+/// the location of the log request. See [`warn_target!`] which can override the
+/// target.
+///
+/// [`warn_target!`]: macro.warn_target.html
+///
+/// # Examples
+///
+/// ```
+/// use ckb_logger::warn;
+///
+/// let warn_description = "Invalid Input";
+///
+/// warn!("Warning! {}!", warn_description);
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! warn {
     ($( $args:tt )*) => {
-        $crate::internal::warn!(target: $crate::env!("CARGO_PKG_NAME"), $( $args )*);
+        $crate::internal::warn!($( $args )*);
     }
 }
 
+/// Logs a message at the error level using the default target.
+///
+/// This macro logs the message using the default target, the module path of
+/// the location of the log request. See [`error_target!`] which can override the
+/// target.
+///
+/// [`error_target!`]: macro.error_target.html
+///
+/// # Examples
+///
+/// ```
+/// use ckb_logger::error;
+///
+/// let (err_info, port) = ("No connection", 22);
+///
+/// error!("Error: {} on port {}", err_info, port);
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! error {
     ($( $args:tt )*) => {
-        $crate::internal::error!(target: $crate::env!("CARGO_PKG_NAME"), $( $args )*);
+        $crate::internal::error!($( $args )*);
     }
 }
 
+/// Determines if a message logged at the specified level and with the default target will be logged.
+///
+/// The default target is the module path of the location of the log request.
+/// See also [`log_enabled_target!`] the version that supports checking arbitrary
+/// target.
+///
+/// [`log_enabled_target!`]: macro.log_enabled_target.html
+///
+/// This can be used to avoid expensive computation of log message arguments if the message would be ignored anyway.
+///
+/// ## Examples
+///
+/// ```
+/// use ckb_logger::Level::Debug;
+/// use ckb_logger::{debug, log_enabled};
+///
+/// # struct Data { x: u32, y: u32 }
+/// # fn expensive_call() -> Data { Data { x: 0, y: 0 } }
+/// if log_enabled!(Debug) {
+///     let data = expensive_call();
+///     debug!("expensive debug data: {} {}", data.x, data.y);
+/// }
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! log_enabled {
     ($level:expr) => {
-        $crate::internal::log_enabled!(target: $crate::env!("CARGO_PKG_NAME"), $level);
+        $crate::internal::log_enabled!($level);
     };
 }
 
+/// Logs a message at the trace level using the specified target.
+///
+/// This macro logs the message using the specified target. In the most
+/// scenarios, the log message should just use the default target, which is the
+/// module path of the location of the log request. See [`trace!`] which just logs
+/// using the default target.
+///
+/// [`trace!`]: macro.trace.html
+///
+/// # Examples
+///
+/// ```
+/// use ckb_logger::trace_target;
+///
+/// # struct Position { x: f32, y: f32 }
+/// let pos = Position { x: 3.234, y: -1.223 };
+///
+/// trace_target!("app_events", "Position is: x: {}, y: {}", pos.x, pos.y);
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! trace_target {
     ($target:expr, $( $args:tt )*) => {
@@ -71,6 +200,25 @@ macro_rules! trace_target {
     }
 }
 
+/// Logs a message at the debug level using the specified target.
+///
+/// This macro logs the message using the specified target. In the most
+/// scenarios, the log message should just use the default target, which is the
+/// module path of the location of the log request. See [`debug!`] which just logs
+/// using the default target.
+///
+/// [`debug!`]: macro.debug.html
+///
+/// # Examples
+///
+/// ```
+/// use ckb_logger::debug_target;
+///
+/// # struct Position { x: f32, y: f32 }
+/// let pos = Position { x: 3.234, y: -1.223 };
+///
+/// debug_target!("app_events", "Position is: x: {}, y: {}", pos.x, pos.y);
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! debug_target {
     ($target:expr, $( $args:tt )*) => {
@@ -78,6 +226,26 @@ macro_rules! debug_target {
     }
 }
 
+/// Logs a message at the info level using the specified target.
+///
+/// This macro logs the message using the specified target. In the most
+/// scenarios, the log message should just use the default target, which is the
+/// module path of the location of the log request. See [`info!`] which just logs
+/// using the default target.
+///
+/// [`info!`]: macro.info.html
+///
+/// # Examples
+///
+/// ```
+/// use ckb_logger::info_target;
+///
+/// # struct Connection { port: u32, speed: f32 }
+/// let conn_info = Connection { port: 40, speed: 3.20 };
+///
+/// info_target!("connection_events", "Successful connection, port: {}, speed: {}",
+///       conn_info.port, conn_info.speed);
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! info_target {
     ($target:expr, $( $args:tt )*) => {
@@ -85,6 +253,24 @@ macro_rules! info_target {
     }
 }
 
+/// Logs a message at the warn level using the specified target.
+///
+/// This macro logs the message using the specified target. In the most
+/// scenarios, the log message should just use the default target, which is the
+/// module path of the location of the log request. See [`warn!`] which just logs
+/// using the default target.
+///
+/// [`warn!`]: macro.warn.html
+///
+/// # Examples
+///
+/// ```
+/// use ckb_logger::warn_target;
+///
+/// let warn_description = "Invalid Input";
+///
+/// warn_target!("input_events", "App received warning: {}", warn_description);
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! warn_target {
     ($target:expr, $( $args:tt )*) => {
@@ -92,6 +278,24 @@ macro_rules! warn_target {
     }
 }
 
+/// Logs a message at the error level using the specified target.
+///
+/// This macro logs the message using the specified target. In the most
+/// scenarios, the log message should just use the default target, which is the
+/// module path of the location of the log request. See [`error!`] which just logs
+/// using the default target.
+///
+/// [`error!`]: macro.error.html
+///
+/// # Examples
+///
+/// ```
+/// use ckb_logger::error_target;
+///
+/// let (err_info, port) = ("No connection", 22);
+///
+/// error_target!("app_events", "App Error: {}, Port: {}", err_info, port);
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! error_target {
     ($target:expr, $( $args:tt )*) => {
@@ -99,220 +303,30 @@ macro_rules! error_target {
     }
 }
 
+/// Determines if a message logged at the specified level and with the specified target will be logged.
+///
+/// This can be used to avoid expensive computation of log message arguments if the message would be ignored anyway.
+///
+/// See also [`log_enabled!`] the version that checks with the default target.
+///
+/// [`log_enabled!`]: macro.log_enabled.html
+///
+/// ## Examples
+///
+/// ```
+/// use ckb_logger::Level::Debug;
+/// use ckb_logger::{debug_target, log_enabled_target};
+///
+/// # struct Data { x: u32, y: u32 }
+/// # fn expensive_call() -> Data { Data { x: 0, y: 0 } }
+/// if log_enabled_target!("Global", Debug) {
+///     let data = expensive_call();
+///     debug_target!("Global", "expensive debug data: {} {}", data.x, data.y);
+/// }
+/// ```
 #[macro_export(local_inner_macros)]
 macro_rules! log_enabled_target {
     ($target:expr, $level:expr) => {
         $crate::internal::log_enabled!(target: $target, $level);
     };
-}
-
-enum Message {
-    Record(String),
-    Terminate,
-}
-
-#[derive(Debug)]
-pub struct Logger {
-    sender: crossbeam_channel::Sender<Message>,
-    handle: Mutex<Option<thread::JoinHandle<()>>>,
-    filter: Filter,
-    emit_sentry_breadcrumbs: bool,
-}
-
-#[cfg(target_os = "windows")]
-fn enable_ansi_support() {
-    ansi_term::enable_ansi_support()
-        .unwrap_or_else(|code| println!("Cannot enable ansi support: {:?}", code));
-}
-
-#[cfg(not(target_os = "windows"))]
-fn enable_ansi_support() {}
-
-impl Logger {
-    fn new(config: Config) -> Logger {
-        let mut builder = Builder::new();
-
-        if let Ok(ref env_filter) = std::env::var("CKB_LOG") {
-            builder.parse(env_filter);
-        } else if let Some(ref config_filter) = config.filter {
-            builder.parse(config_filter);
-        }
-
-        let (sender, receiver) = unbounded();
-        let Config {
-            color,
-            file,
-            log_to_file,
-            log_to_stdout,
-            ..
-        } = config;
-        let file = if log_to_file { file } else { None };
-
-        let tb = thread::Builder::new()
-            .name("LogWriter".to_owned())
-            .spawn(move || {
-                enable_ansi_support();
-
-                let file = file.map(|file| {
-                    fs::OpenOptions::new()
-                        .append(true)
-                        .create(true)
-                        .open(&file)
-                        .unwrap_or_else(|_| {
-                            panic!("Cannot write to log file given: {:?}", file.as_os_str())
-                        })
-                });
-
-                loop {
-                    match receiver.recv() {
-                        Ok(Message::Record(record)) => {
-                            let removed_color = sanitize_color(record.as_ref());
-                            let output = if color { record } else { removed_color.clone() };
-                            if let Some(mut file) = file.as_ref() {
-                                let _ = file.write_all(removed_color.as_bytes());
-                                let _ = file.write_all(b"\n");
-                            };
-                            if log_to_stdout {
-                                println!("{}", output);
-                            }
-                        }
-                        Ok(Message::Terminate) | Err(_) => {
-                            break;
-                        }
-                    }
-                }
-            })
-            .expect("Logger thread init should not fail");
-
-        Logger {
-            sender,
-            handle: Mutex::new(Some(tb)),
-            filter: builder.build(),
-            emit_sentry_breadcrumbs: config.emit_sentry_breadcrumbs.unwrap_or_default(),
-        }
-    }
-
-    pub fn filter(&self) -> LevelFilter {
-        self.filter.filter()
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Config {
-    pub filter: Option<String>,
-    pub color: bool,
-    pub file: Option<PathBuf>,
-    pub log_to_file: bool,
-    pub log_to_stdout: bool,
-    pub emit_sentry_breadcrumbs: Option<bool>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            filter: None,
-            color: !cfg!(windows),
-            file: None,
-            log_to_file: false,
-            log_to_stdout: true,
-            emit_sentry_breadcrumbs: None,
-        }
-    }
-}
-
-impl Log for Logger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        self.filter.enabled(metadata)
-    }
-
-    fn log(&self, record: &Record) {
-        // Check if the record is matched by the filter
-        if self.filter.matches(record) {
-            if self.emit_sentry_breadcrumbs {
-                use sentry::{add_breadcrumb, integrations::log::breadcrumb_from_record};
-                add_breadcrumb(|| breadcrumb_from_record(record));
-            }
-
-            let thread = thread::current();
-            let thread_name = thread.name().unwrap_or_default();
-
-            let with_color = {
-                let thread_name = format!("{}", Colour::Blue.bold().paint(thread_name));
-                let dt: DateTime<Local> = Local::now();
-                let timestamp = dt.format("%Y-%m-%d %H:%M:%S%.3f %Z").to_string();
-                format!(
-                    "{} {} {} {}  {}",
-                    Colour::Black.bold().paint(timestamp),
-                    thread_name,
-                    record.level(),
-                    record.target(),
-                    record.args()
-                )
-            };
-            let _ = self.sender.send(Message::Record(with_color));
-        }
-    }
-
-    fn flush(&self) {
-        let handle = self.handle.lock().take().expect("Logger flush only once");
-        let _ = self.sender.send(Message::Terminate);
-        let _ = handle.join();
-    }
-}
-
-fn sanitize_color(s: &str) -> String {
-    lazy_static! {
-        static ref RE: Regex = Regex::new("\x1b\\[[^m]+m").expect("Regex compile success");
-    }
-    RE.replace_all(s, "").to_string()
-}
-
-/// Flush the logger when dropped
-#[must_use]
-pub struct LoggerInitGuard;
-
-impl Drop for LoggerInitGuard {
-    fn drop(&mut self) {
-        flush();
-    }
-}
-
-pub fn init(config: Config) -> Result<LoggerInitGuard, SetLoggerError> {
-    setup_panic_logger();
-
-    let logger = Logger::new(config);
-    log::set_max_level(logger.filter());
-    log::set_boxed_logger(Box::new(logger)).map(|_| LoggerInitGuard)
-}
-
-pub fn flush() {
-    log::logger().flush()
-}
-
-// Replace the default panic hook with logger hook, which prints panic info into logfile.
-// This function will replace all hooks that was previously registered, so make sure involving
-// before other register operations.
-fn setup_panic_logger() {
-    let panic_logger = |info: &panic::PanicInfo| {
-        let backtrace = Backtrace::new();
-        let thread = thread::current();
-        let name = thread.name().unwrap_or("unnamed");
-        let location = info.location().unwrap(); // The current implementation always returns Some
-        let msg = match info.payload().downcast_ref::<&'static str>() {
-            Some(s) => *s,
-            None => match info.payload().downcast_ref::<String>() {
-                Some(s) => &*s,
-                None => "Box<Any>",
-            },
-        };
-        log::error!(
-            target: "panic", "thread '{}' panicked at '{}': {}:{}{:?}",
-            name,
-            msg,
-            location.file(),
-            location.line(),
-            backtrace,
-        );
-    };
-    panic::set_hook(Box::new(panic_logger));
 }

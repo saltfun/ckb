@@ -1,40 +1,123 @@
+//! TODO(doc): @quake
 use crate::ChainStore;
-use ckb_script_data_loader::DataLoader;
+use ckb_traits::{CellDataProvider, EpochProvider, HeaderProvider};
 use ckb_types::{
     bytes::Bytes,
-    core::{cell::CellMeta, BlockExt, EpochExt, HeaderView},
-    packed::Byte32,
-    prelude::*,
+    core::{BlockExt, BlockNumber, EpochExt, HeaderView},
+    packed::{Byte32, OutPoint},
 };
+use std::sync::Arc;
 
-pub struct DataLoaderWrapper<'a, T>(&'a T);
-impl<'a, T: ChainStore<'a>> DataLoaderWrapper<'a, T> {
-    pub fn new(source: &'a T) -> Self {
-        DataLoaderWrapper(source)
+/// DataLoaderWrapper wrap`ChainStore`
+/// impl `HeaderProvider` `CellDataProvider` `EpochProvider`
+pub struct DataLoaderWrapper<T>(Arc<T>);
+
+// auto derive don't work
+impl<T> Clone for DataLoaderWrapper<T> {
+    fn clone(&self) -> Self {
+        DataLoaderWrapper(Arc::clone(&self.0))
     }
 }
 
-impl<'a, T: ChainStore<'a>> DataLoader for DataLoaderWrapper<'a, T> {
-    fn load_cell_data(&self, cell: &CellMeta) -> Option<(Bytes, Byte32)> {
-        cell.mem_cell_data
-            .as_ref()
-            .map(ToOwned::to_owned)
-            .or_else(|| {
-                self.0
-                    .get_cell_data(&cell.out_point.tx_hash(), cell.out_point.index().unpack())
-            })
+/// Auto transform Arc wrapped `ChainStore` to `DataLoaderWrapper`
+pub trait AsDataLoader<T> {
+    /// Return arc cloned DataLoaderWrapper
+    fn as_data_loader(&self) -> DataLoaderWrapper<T>;
+}
+
+impl<T> AsDataLoader<T> for Arc<T>
+where
+    T: ChainStore,
+{
+    fn as_data_loader(&self) -> DataLoaderWrapper<T> {
+        DataLoaderWrapper(Arc::clone(self))
     }
-    // load BlockExt
-    #[inline]
+}
+
+impl<T> CellDataProvider for DataLoaderWrapper<T>
+where
+    T: ChainStore,
+{
+    fn get_cell_data(&self, out_point: &OutPoint) -> Option<Bytes> {
+        ChainStore::get_cell_data(self.0.as_ref(), out_point).map(|(data, _)| data)
+    }
+
+    fn get_cell_data_hash(&self, out_point: &OutPoint) -> Option<Byte32> {
+        ChainStore::get_cell_data_hash(self.0.as_ref(), out_point)
+    }
+}
+
+impl<T> HeaderProvider for DataLoaderWrapper<T>
+where
+    T: ChainStore,
+{
+    fn get_header(&self, block_hash: &Byte32) -> Option<HeaderView> {
+        ChainStore::get_block_header(self.0.as_ref(), block_hash)
+    }
+}
+
+impl<T> EpochProvider for DataLoaderWrapper<T>
+where
+    T: ChainStore,
+{
+    fn get_epoch_ext(&self, header: &HeaderView) -> Option<EpochExt> {
+        ChainStore::get_block_epoch_index(self.0.as_ref(), &header.hash())
+            .and_then(|index| ChainStore::get_epoch_ext(self.0.as_ref(), &index))
+    }
+
+    fn get_block_hash(&self, number: BlockNumber) -> Option<Byte32> {
+        ChainStore::get_block_hash(self.0.as_ref(), number)
+    }
+
     fn get_block_ext(&self, block_hash: &Byte32) -> Option<BlockExt> {
-        self.0.get_block_ext(block_hash)
+        ChainStore::get_block_ext(self.0.as_ref(), block_hash)
     }
 
-    fn get_block_epoch(&self, block_hash: &Byte32) -> Option<EpochExt> {
-        self.0.get_block_epoch(block_hash)
+    fn get_block_header(&self, hash: &Byte32) -> Option<HeaderView> {
+        ChainStore::get_block_header(self.0.as_ref(), hash)
+    }
+}
+
+/// Borrowed DataLoaderWrapper with lifetime
+pub struct BorrowedDataLoaderWrapper<'a, T>(&'a T);
+impl<'a, T: ChainStore> BorrowedDataLoaderWrapper<'a, T> {
+    /// Construct new BorrowedDataLoaderWrapper
+    pub fn new(source: &'a T) -> Self {
+        BorrowedDataLoaderWrapper(source)
+    }
+}
+
+impl<'a, T: ChainStore> CellDataProvider for BorrowedDataLoaderWrapper<'a, T> {
+    fn get_cell_data(&self, out_point: &OutPoint) -> Option<Bytes> {
+        self.0.get_cell_data(out_point).map(|(data, _)| data)
     }
 
+    fn get_cell_data_hash(&self, out_point: &OutPoint) -> Option<Byte32> {
+        self.0.get_cell_data_hash(out_point)
+    }
+}
+
+impl<'a, T: ChainStore> HeaderProvider for BorrowedDataLoaderWrapper<'a, T> {
     fn get_header(&self, block_hash: &Byte32) -> Option<HeaderView> {
         self.0.get_block_header(block_hash)
+    }
+}
+
+impl<'a, T: ChainStore> EpochProvider for BorrowedDataLoaderWrapper<'a, T> {
+    fn get_epoch_ext(&self, header: &HeaderView) -> Option<EpochExt> {
+        ChainStore::get_block_epoch_index(self.0, &header.hash())
+            .and_then(|index| ChainStore::get_epoch_ext(self.0, &index))
+    }
+
+    fn get_block_hash(&self, number: BlockNumber) -> Option<Byte32> {
+        ChainStore::get_block_hash(self.0, number)
+    }
+
+    fn get_block_ext(&self, block_hash: &Byte32) -> Option<BlockExt> {
+        ChainStore::get_block_ext(self.0, block_hash)
+    }
+
+    fn get_block_header(&self, hash: &Byte32) -> Option<HeaderView> {
+        ChainStore::get_block_header(self.0, hash)
     }
 }

@@ -1,12 +1,12 @@
-use crate::utils::is_committed;
-use crate::{Net, Spec};
-use ckb_app_config::CKBAppConfig;
+use crate::util::check::is_transaction_committed;
+use crate::{Node, Spec};
+use ckb_app_config::BlockAssemblerConfig;
 use ckb_chain_spec::{build_genesis_type_id_script, OUTPUT_INDEX_SECP256K1_BLAKE160_MULTISIG_ALL};
 use ckb_crypto::secp::{Generator, Privkey};
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_jsonrpc_types::JsonBytes;
+use ckb_logger::info;
 use ckb_resource::CODE_HASH_SECP256K1_BLAKE160_MULTISIG_ALL;
-use ckb_tx_pool::BlockAssemblerConfig;
 use ckb_types::{
     bytes::Bytes,
     core::{capacity_bytes, Capacity, DepType, ScriptHashType, TransactionBuilder},
@@ -14,7 +14,6 @@ use ckb_types::{
     prelude::*,
     H160, H256,
 };
-use log::info;
 
 pub struct SendMultiSigSecpTxUseDepGroup {
     // secp lock script's hash type
@@ -39,13 +38,13 @@ impl Spec for SendMultiSigSecpTxUseDepGroup {
         self.name
     }
 
-    fn run(&self, net: &mut Net) {
-        let node = &net.nodes[0];
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
 
         info!("Generate 20 block on node");
-        node.generate_blocks(20);
+        node.mine(20);
 
-        let secp_out_point = OutPoint::new(node.dep_group_tx_hash().clone(), 1);
+        let secp_out_point = OutPoint::new(node.dep_group_tx_hash(), 1);
         let block = node.get_tip_block();
         let cellbase_hash = block.transactions()[0].hash();
 
@@ -76,9 +75,9 @@ impl Spec for SendMultiSigSecpTxUseDepGroup {
         let witness_len = witness.as_slice().len() as u64;
         let message = {
             let mut hasher = new_blake2b();
-            hasher.update(&tx_hash.as_slice());
+            hasher.update(tx_hash.as_slice());
             hasher.update(&witness_len.to_le_bytes());
-            hasher.update(&witness.as_slice());
+            hasher.update(witness.as_slice());
             let mut buf = [0u8; 32];
             hasher.finalize(&mut buf);
             H256::from(buf)
@@ -102,28 +101,18 @@ impl Spec for SendMultiSigSecpTxUseDepGroup {
             .build();
         info!("Send 1 multisig tx use dep group");
 
-        let tx_hash = node.rpc_client().send_transaction(tx.data().into());
-        node.generate_blocks(20);
+        node.rpc_client().send_transaction(tx.data().into());
+        node.mine(20);
 
-        let tx_status = node
-            .rpc_client()
-            .get_transaction(tx_hash.clone())
-            .expect("get sent transaction");
-        assert!(
-            is_committed(&tx_status),
-            "ensure_committed failed {}",
-            tx_hash
-        );
+        assert!(is_transaction_committed(node, &tx));
     }
 
-    fn modify_ckb_config(&self) -> Box<dyn Fn(&mut CKBAppConfig) -> ()> {
+    fn modify_app_config(&self, config: &mut ckb_app_config::CKBAppConfig) {
         let multi_sign_script = gen_multi_sign_script(&self.keys, self.keys.len() as u8, 0);
         let lock_arg = Bytes::from(blake160(&multi_sign_script).as_bytes().to_vec());
         let hash_type = self.hash_type;
-        Box::new(move |config| {
-            let block_assembler = new_block_assembler_config(lock_arg.clone(), hash_type);
-            config.block_assembler = Some(block_assembler);
-        })
+        let block_assembler = new_block_assembler_config(lock_arg, hash_type);
+        config.block_assembler = Some(block_assembler);
     }
 }
 
@@ -139,7 +128,7 @@ fn gen_multi_sign_script(keys: &[Privkey], threshold: u8, require_first_n: u8) -
         .collect::<Vec<_>>();
     let mut script = vec![0u8, require_first_n, threshold, pubkeys.len() as u8];
     pubkeys.iter().for_each(|pubkey| {
-        script.extend_from_slice(&blake160(&pubkey.serialize()).as_bytes());
+        script.extend_from_slice(blake160(&pubkey.serialize()).as_bytes());
     });
     script.into()
 }
@@ -161,5 +150,11 @@ fn new_block_assembler_config(lock_arg: Bytes, hash_type: ScriptHashType) -> Blo
         hash_type: hash_type.into(),
         args: JsonBytes::from_bytes(lock_arg),
         message: Default::default(),
+        use_binary_version_as_message_prefix: false,
+        binary_version: "TEST".to_string(),
+        update_interval_millis: 0,
+        notify: vec![],
+        notify_scripts: vec![],
+        notify_timeout_millis: 800,
     }
 }

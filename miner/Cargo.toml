@@ -1,25 +1,34 @@
 [package]
 name = "ckb-miner"
-version = "0.25.0-pre"
+version = "0.110.0-pre"
 license = "MIT"
 authors = ["Nervos Core Dev <dev@nervos.org>"]
-edition = "2018"
+edition = "2021"
+description = "TODO(doc): @quake crate description"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
 
 [dependencies]
-ckb-logger = { path = "../util/logger" }
-ckb-types = { path = "../util/types" }
-ckb-pow = { path = "../pow" }
-rand = "0.6"
-serde = "1.0"
-serde_derive = "1.0"
-crossbeam-channel = "0.3"
+ckb-logger = { path = "../util/logger", version = "= 0.110.0-pre" }
+ckb-app-config = { path = "../util/app-config", version = "= 0.110.0-pre" }
+ckb-types = { path = "../util/types", version = "= 0.110.0-pre" }
+ckb-channel = { path = "../util/channel", version = "= 0.110.0-pre" }
+ckb-hash = { path = "../util/hash", version = "= 0.110.0-pre" }
+ckb-pow = { path = "../pow", version = "= 0.110.0-pre" }
+rand = "0.7"
+rand_distr = "0.3"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-ckb-jsonrpc-types = { path = "../util/jsonrpc-types" }
-hyper = "0.12"
-futures = "0.1"
-lru-cache = { git = "https://github.com/nervosnetwork/lru-cache", rev = "a35fdb8" }
-ckb-stop-handler = { path = "../util/stop-handler" }
-failure = "0.1.5"
-indicatif = "0.11"
-console = "0.8.0"
+ckb-jsonrpc-types = { path = "../util/jsonrpc-types", version = "= 0.110.0-pre" }
+hyper = { version = "0.14", features = ["client", "http2", "http1", "server"]  }
+hyper-tls = "0.5"
+futures = "0.3"
+lru = "0.7.1"
+ckb-stop-handler = { path = "../util/stop-handler", version = "= 0.110.0-pre" }
+ckb-async-runtime = { path = "../util/runtime", version = "= 0.110.0-pre" }
+indicatif = "0.16"
+console = ">=0.9.1, <1.0.0"
 eaglesong = "0.1"
+base64 = "0.21.0"
+jsonrpc-core = "18.0"
+tokio = { version = "1", features = ["sync"]  }

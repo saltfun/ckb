@@ -5,4 +5,6 @@ target/
 data/
 specs/
 docs/
+test/
 docker/
+!docker/docker-entrypoint.sh

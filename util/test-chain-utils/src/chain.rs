@@ -5,6 +5,7 @@ use ckb_chain_spec::{
 };
 use ckb_dao_utils::genesis_dao_data;
 use ckb_resource::Resource;
+use ckb_systemtime::unix_time_as_millis;
 use ckb_types::{
     bytes::Bytes,
     core::{
@@ -16,39 +17,116 @@ use ckb_types::{
     utilities::difficulty_to_compact,
     H256, U256,
 };
-use faketime::unix_time_as_millis;
 use lazy_static::lazy_static;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-lazy_static! {
-    static ref SUCCESS_CELL: (CellOutput, Bytes, Script) = {
-        let mut file = File::open(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../script/testdata/always_success"),
-        )
-        .unwrap();
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).unwrap();
-        let data: Bytes = buffer.into();
+fn load_cell_from_path(path: &str) -> (CellOutput, Bytes, Script) {
+    let mut file = File::open(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap();
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).unwrap();
+    let data: Bytes = buffer.into();
 
-        let cell = CellOutput::new_builder()
-            .capacity(Capacity::bytes(data.len()).unwrap().pack())
-            .build();
+    let cell = CellOutput::new_builder()
+        .capacity(Capacity::bytes(data.len()).unwrap().pack())
+        .build();
 
-        let script = Script::new_builder()
-            .hash_type(ScriptHashType::Data.into())
-            .code_hash(CellOutput::calc_data_hash(&data))
-            .build();
+    let script = Script::new_builder()
+        .hash_type(ScriptHashType::Data.into())
+        .code_hash(CellOutput::calc_data_hash(&data))
+        .build();
 
-        (cell, data, script)
-    };
+    (cell, data, script)
 }
 
+lazy_static! {
+    static ref SUCCESS_CELL: (CellOutput, Bytes, Script) =
+        load_cell_from_path("../../script/testdata/always_success");
+}
+
+// #include "ckb_syscalls.h"
+
+// #define HASH_SIZE 32
+
+// int main() {
+//   int ret;
+//   uint64_t hash_len = HASH_SIZE;
+//   unsigned char data_hash[HASH_SIZE];
+
+//   ret = ckb_load_cell_by_field(data_hash, &hash_len, 0, 0, CKB_SOURCE_INPUT, CKB_CELL_FIELD_DATA_HASH);
+//   if (ret != CKB_SUCCESS) {
+//     return ret;
+//   }
+
+//   return 0;
+// }
+lazy_static! {
+    static ref LOAD_INPUT_DATA_HASH: (CellOutput, Bytes, Script) =
+        load_cell_from_path("vendor/load_input_data_hash");
+}
+
+/// Script for loading input data hash from input data.
+#[doc(hidden)]
+pub fn load_input_data_hash_cell() -> &'static (CellOutput, Bytes, Script) {
+    &LOAD_INPUT_DATA_HASH
+}
+
+// #include "ckb_syscalls.h"
+
+// int main() {
+//   int ret;
+//   uint8_t data[1];
+//   uint64_t len = 1;
+
+//   ret = ckb_load_cell_data(data, &len, 0, 0, CKB_SOURCE_INPUT);
+
+//   if (ret != CKB_SUCCESS) {
+//     return ret;
+//   }
+
+//   return 0;
+// }
+lazy_static! {
+    static ref LOAD_INPUT_ONE_BYTE: (CellOutput, Bytes, Script) =
+        load_cell_from_path("vendor/load_input_one_byte");
+}
+
+/// Script for loading one byte from input data.
+#[doc(hidden)]
+pub fn load_input_one_byte_cell() -> &'static (CellOutput, Bytes, Script) {
+    &LOAD_INPUT_ONE_BYTE
+}
+
+/// Script for returning always success cell.
+#[doc(hidden)]
 pub fn always_success_cell() -> &'static (CellOutput, Bytes, Script) {
     &SUCCESS_CELL
 }
 
+lazy_static! {
+    static ref IS_EVEN_LIB: (CellOutput, Bytes, Script) =
+        load_cell_from_path("../../script/testdata/is_even.lib");
+}
+
+#[doc(hidden)]
+pub fn is_even_lib() -> &'static (CellOutput, Bytes, Script) {
+    &IS_EVEN_LIB
+}
+
+// from script/testdata without ty_pause
+lazy_static! {
+    static ref LOAD_IS_EVEN: (CellOutput, Bytes, Script) =
+        load_cell_from_path("vendor/load_is_even_with_snapshot");
+}
+
+#[doc(hidden)]
+pub fn load_is_even() -> &'static (CellOutput, Bytes, Script) {
+    &LOAD_IS_EVEN
+}
+
+/// Build and return an always success consensus instance.
+#[doc(hidden)]
 pub fn always_success_consensus() -> Consensus {
     let (always_success_cell, always_success_cell_data, always_success_script) =
         always_success_cell();
@@ -71,6 +149,8 @@ pub fn always_success_consensus() -> Consensus {
         .build()
 }
 
+/// Build and return an always success cellbase transaction view.
+#[doc(hidden)]
 pub fn always_success_cellbase(
     block_number: BlockNumber,
     reward: Capacity,
@@ -96,25 +176,38 @@ pub fn always_success_cellbase(
     }
 }
 
+/// Return chain spec by name, which could be:
+///   - ckb_mainnet
+///   - ckb_testnet
+///   - ckb_staging
+///   - ckb_dev
+#[doc(hidden)]
 fn load_spec_by_name(name: &str) -> ChainSpec {
     // remove "ckb_" prefix
     let base_name = &name[4..];
-    let res = Resource::bundled(format!("specs/{}.toml", base_name));
+    let res = Resource::bundled(format!("specs/{base_name}.toml"));
     ChainSpec::load_from(&res).expect("load spec by name")
 }
 
+/// Return testnet consensus instance.
+#[doc(hidden)]
 pub fn ckb_testnet_consensus() -> Consensus {
     let name = "ckb_testnet";
     let spec = load_spec_by_name(name);
     spec.build_consensus().unwrap()
 }
 
+/// Return code hash of genesis type_id script which built with output index of SECP256K1/blake160 script.
+#[doc(hidden)]
 pub fn type_lock_script_code_hash() -> H256 {
     build_genesis_type_id_script(OUTPUT_INDEX_SECP256K1_BLAKE160_SIGHASH_ALL)
         .calc_script_hash()
         .unpack()
 }
 
+/// Return cell output and data in genesis block's cellbase transaction with index of SECP256K1/blake160 script,
+/// the genesis block depends on the consensus parameter.
+#[doc(hidden)]
 pub fn secp256k1_blake160_sighash_cell(consensus: Consensus) -> (CellOutput, Bytes) {
     let genesis_block = consensus.genesis_block();
     let tx = genesis_block.transactions()[0].clone();
@@ -125,6 +218,9 @@ pub fn secp256k1_blake160_sighash_cell(consensus: Consensus) -> (CellOutput, Byt
     (cell_output, data)
 }
 
+/// Return cell output and data in genesis block's cellbase transaction with index of SECP256K1,
+/// the genesis block depends on the consensus parameter.
+#[doc(hidden)]
 pub fn secp256k1_data_cell(consensus: Consensus) -> (CellOutput, Bytes) {
     let genesis_block = consensus.genesis_block();
     let tx = genesis_block.transactions()[0].clone();

@@ -1,6 +1,14 @@
+//! ckb network module
+//!
+//! This module is based on the Tentacle library, once again abstract the context that protocols can use,
+//! and providing a unified implementation of the peer storage and registration mechanism.
+//!
+//! And implemented several basic protocols: identify, discovery, ping, feeler, disconnect_message
+//!
+
 mod behaviour;
-mod compress;
-mod config;
+/// compress module
+pub mod compress;
 pub mod errors;
 pub mod network;
 mod network_group;
@@ -15,44 +23,61 @@ mod tests;
 
 pub use crate::{
     behaviour::Behaviour,
-    config::NetworkConfig,
     errors::Error,
-    network::{NetworkController, NetworkService, NetworkState},
+    network::{
+        DefaultExitHandler, EventHandler, ExitHandler, NetworkController, NetworkService,
+        NetworkState,
+    },
     peer::{Peer, PeerIdentifyInfo},
     peer_registry::PeerRegistry,
-    peer_store::{types::MultiaddrExt, Score},
-    protocols::{CKBProtocol, CKBProtocolContext, CKBProtocolHandler, PeerIndex},
+    peer_store::Score,
+    protocols::{
+        identify::Flags, support_protocols::SupportProtocols, CKBProtocol, CKBProtocolContext,
+        CKBProtocolHandler, PeerIndex,
+    },
 };
 pub use p2p::{
-    multiaddr,
+    async_trait,
+    builder::ServiceBuilder,
+    bytes, multiaddr,
     secio::{PeerId, PublicKey},
-    service::{ServiceControl, SessionType, TargetSession},
+    service::{ServiceControl, SessionType, TargetProtocol, TargetSession},
     traits::ServiceProtocol,
-    ProtocolId,
+    utils::{extract_peer_id, multiaddr_to_socketaddr},
+    ProtocolId, SessionId,
 };
+pub use tokio;
 
-// Max message frame length for sync protocol: 2MB
-//   NOTE: update this value when block size limit changed
-pub const MAX_FRAME_LENGTH_SYNC: usize = 2 * 1024 * 1024;
-// Max message frame length for relay protocol: 2MB
-//   NOTE: update this value when block size limit changed
-pub const MAX_FRAME_LENGTH_RELAY: usize = 2 * 1024 * 1024;
-// Max message frame length for time protocol: 1KB
-pub const MAX_FRAME_LENGTH_TIME: usize = 1024;
-// Max message frame length for alert protocol: 128KB
-pub const MAX_FRAME_LENGTH_ALERT: usize = 128 * 1024;
-// Max message frame length for discovery protocol: 512KB
-pub const MAX_FRAME_LENGTH_DISCOVERY: usize = 512 * 1024;
-// Max message frame length for ping protocol: 1KB
-pub const MAX_FRAME_LENGTH_PING: usize = 1024;
-// Max message frame length for identify protocol: 2KB
-pub const MAX_FRAME_LENGTH_IDENTIFY: usize = 2 * 1024;
-// Max message frame length for disconnectmsg protocol: 1KB
-pub const MAX_FRAME_LENGTH_DISCONNECTMSG: usize = 1024;
-// Max message frame length for feeler protocol: 1KB
-pub const MAX_FRAME_LENGTH_FEELER: usize = 1024;
-
-// Max data size in send buffer: 24MB (a little larger than max frame length)
-pub const DEFAULT_SEND_BUFFER: usize = 24 * 1024 * 1024;
-
+/// Protocol version used by network protocol open
 pub type ProtocolVersion = String;
+
+/// Observe listen port occupancy
+pub async fn observe_listen_port_occupancy(
+    _addrs: &[multiaddr::MultiAddr],
+) -> Result<(), std::io::Error> {
+    #[cfg(target_os = "linux")]
+    {
+        use p2p::utils::dns::DnsResolver;
+        use std::net::{SocketAddr, TcpListener};
+
+        for raw_addr in _addrs {
+            let ip_addr: Option<SocketAddr> = match DnsResolver::new(raw_addr.clone()) {
+                Some(dns) => dns.await.ok().as_ref().and_then(multiaddr_to_socketaddr),
+                None => multiaddr_to_socketaddr(raw_addr),
+            };
+
+            if let Some(addr) = ip_addr {
+                if let Err(e) = TcpListener::bind(addr) {
+                    ckb_logger::error!(
+                        "addr {} can't use on your machines by error: {}, please check",
+                        raw_addr,
+                        e
+                    );
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}

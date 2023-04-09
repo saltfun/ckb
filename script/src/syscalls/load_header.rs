@@ -1,4 +1,4 @@
-use crate::DataLoader;
+use crate::types::Indices;
 use crate::{
     cost_model::transferred_byte_cycles,
     syscalls::{
@@ -7,6 +7,8 @@ use crate::{
         LOAD_HEADER_BY_FIELD_SYSCALL_NUMBER, LOAD_HEADER_SYSCALL_NUMBER, SUCCESS,
     },
 };
+use ckb_traits::HeaderProvider;
+use ckb_types::core::cell::ResolvedTransaction;
 use ckb_types::{
     core::{cell::CellMeta, HeaderView},
     packed::Byte32Vec,
@@ -16,32 +18,45 @@ use ckb_vm::{
     registers::{A0, A3, A4, A5, A7},
     Error as VMError, Register, SupportMachine, Syscalls,
 };
+use std::sync::Arc;
 
 #[derive(Debug)]
-pub struct LoadHeader<'a, DL> {
-    data_loader: &'a DL,
+pub struct LoadHeader<DL> {
+    data_loader: DL,
+    rtx: Arc<ResolvedTransaction>,
     // This can only be used for liner search
-    header_deps: Byte32Vec,
-    resolved_inputs: &'a [CellMeta],
-    resolved_cell_deps: &'a [CellMeta],
-    group_inputs: &'a [usize],
+    // header_deps: Byte32Vec,
+    // resolved_inputs: &'a [CellMeta],
+    // resolved_cell_deps: &'a [CellMeta],
+    group_inputs: Indices,
 }
 
-impl<'a, DL: DataLoader + 'a> LoadHeader<'a, DL> {
+impl<DL: HeaderProvider> LoadHeader<DL> {
     pub fn new(
-        data_loader: &'a DL,
-        header_deps: Byte32Vec,
-        resolved_inputs: &'a [CellMeta],
-        resolved_cell_deps: &'a [CellMeta],
-        group_inputs: &'a [usize],
-    ) -> LoadHeader<'a, DL> {
+        data_loader: DL,
+        rtx: Arc<ResolvedTransaction>,
+        group_inputs: Indices,
+    ) -> LoadHeader<DL> {
         LoadHeader {
             data_loader,
-            header_deps,
-            resolved_inputs,
-            resolved_cell_deps,
+            rtx,
             group_inputs,
         }
+    }
+
+    #[inline]
+    fn header_deps(&self) -> Byte32Vec {
+        self.rtx.transaction.header_deps()
+    }
+
+    #[inline]
+    fn resolved_inputs(&self) -> &Vec<CellMeta> {
+        &self.rtx.resolved_inputs
+    }
+
+    #[inline]
+    fn resolved_cell_deps(&self) -> &Vec<CellMeta> {
+        &self.rtx.resolved_cell_deps
     }
 
     fn load_header(&self, cell_meta: &CellMeta) -> Option<HeaderView> {
@@ -51,12 +66,11 @@ impl<'a, DL: DataLoader + 'a> LoadHeader<'a, DL> {
             .expect("block_info of CellMeta should exists when load_header in syscall")
             .block_hash;
         if self
-            .header_deps
-            .clone()
+            .header_deps()
             .into_iter()
             .any(|hash| &hash == block_hash)
         {
-            self.data_loader.get_header(&block_hash)
+            self.data_loader.get_header(block_hash)
         } else {
             None
         }
@@ -65,18 +79,18 @@ impl<'a, DL: DataLoader + 'a> LoadHeader<'a, DL> {
     fn fetch_header(&self, source: Source, index: usize) -> Result<HeaderView, u8> {
         match source {
             Source::Transaction(SourceEntry::Input) => self
-                .resolved_inputs
+                .resolved_inputs()
                 .get(index)
                 .ok_or(INDEX_OUT_OF_BOUND)
                 .and_then(|cell_meta| self.load_header(cell_meta).ok_or(ITEM_MISSING)),
             Source::Transaction(SourceEntry::Output) => Err(INDEX_OUT_OF_BOUND),
             Source::Transaction(SourceEntry::CellDep) => self
-                .resolved_cell_deps
+                .resolved_cell_deps()
                 .get(index)
                 .ok_or(INDEX_OUT_OF_BOUND)
                 .and_then(|cell_meta| self.load_header(cell_meta).ok_or(ITEM_MISSING)),
             Source::Transaction(SourceEntry::HeaderDep) => self
-                .header_deps
+                .header_deps()
                 .get(index)
                 .ok_or(INDEX_OUT_OF_BOUND)
                 .and_then(|block_hash| {
@@ -87,7 +101,7 @@ impl<'a, DL: DataLoader + 'a> LoadHeader<'a, DL> {
                 .get(index)
                 .ok_or(INDEX_OUT_OF_BOUND)
                 .and_then(|actual_index| {
-                    self.resolved_inputs
+                    self.resolved_inputs()
                         .get(*actual_index)
                         .ok_or(INDEX_OUT_OF_BOUND)
                 })
@@ -114,24 +128,25 @@ impl<'a, DL: DataLoader + 'a> LoadHeader<'a, DL> {
         header: &HeaderView,
     ) -> Result<(u8, u64), VMError> {
         let field = HeaderField::parse_from_u64(machine.registers()[A5].to_u64())?;
-        let epoch = match self.data_loader.get_block_epoch(&header.hash()) {
-            Some(epoch) => epoch,
-            None => return Ok((ITEM_MISSING, 0)),
-        };
+        let epoch = header.epoch();
 
         let result = match field {
-            HeaderField::EpochNumber => (SUCCESS, store_u64(machine, epoch.number())?),
+            HeaderField::EpochNumber => epoch.number(),
             HeaderField::EpochStartBlockNumber => {
-                (SUCCESS, store_u64(machine, epoch.start_number())?)
+                header.number().checked_sub(epoch.index()).ok_or_else(|| {
+                    VMError::Unexpected(format!(
+                        "Unexpected header epoch number index overflow {epoch}"
+                    ))
+                })?
             }
-            HeaderField::EpochLength => (SUCCESS, store_u64(machine, epoch.length())?),
+            HeaderField::EpochLength => epoch.length(),
         };
 
-        Ok(result)
+        Ok((SUCCESS, store_u64(machine, result)?))
     }
 }
 
-impl<'a, DL: DataLoader + 'a, Mac: SupportMachine> Syscalls<Mac> for LoadHeader<'a, DL> {
+impl<DL: HeaderProvider + Send + Sync, Mac: SupportMachine> Syscalls<Mac> for LoadHeader<DL> {
     fn initialize(&mut self, _machine: &mut Mac) -> Result<(), VMError> {
         Ok(())
     }
@@ -158,7 +173,7 @@ impl<'a, DL: DataLoader + 'a, Mac: SupportMachine> Syscalls<Mac> for LoadHeader<
             self.load_full(machine, &header)?
         };
 
-        machine.add_cycles(transferred_byte_cycles(len))?;
+        machine.add_cycles_no_checking(transferred_byte_cycles(len))?;
         machine.set_register(A0, Mac::REG::from_u8(return_code));
         Ok(true)
     }

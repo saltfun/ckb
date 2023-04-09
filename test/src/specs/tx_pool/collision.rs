@@ -1,7 +1,10 @@
-use crate::utils::{blank, commit, propose};
-use crate::{Net, Node, Spec};
+use crate::util::check::{
+    is_transaction_committed, is_transaction_pending, is_transaction_rejected,
+};
+use crate::utils::{assert_send_transaction_fail, blank, commit, propose};
+use crate::{Node, Spec};
 use ckb_types::bytes::Bytes;
-use ckb_types::core::{Capacity, TransactionView};
+use ckb_types::core::{capacity_bytes, Capacity, TransactionView};
 use ckb_types::prelude::*;
 
 // Convention:
@@ -11,14 +14,12 @@ use ckb_types::prelude::*;
 pub struct TransactionHashCollisionDifferentWitnessHashes;
 
 impl Spec for TransactionHashCollisionDifferentWitnessHashes {
-    crate::name!("transaction_hash_collision_different_witness_hashes");
-
     // Case: `tx1` and `tx2` have the same tx_hash, but different witness_hash.
-    fn run(&self, net: &mut Net) {
-        let node = &net.nodes[0];
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
         let window = node.consensus().tx_proposal_window();
         let start_issue = window.farthest() + 2;
-        node.generate_blocks((start_issue.saturating_sub(node.get_tip_block_number())) as usize);
+        node.mine(start_issue.saturating_sub(node.get_tip_block_number()));
 
         let (tx1, tx2) = cousin_txs_with_same_hash_different_witness_hash(node);
 
@@ -30,20 +31,18 @@ impl Spec for TransactionHashCollisionDifferentWitnessHashes {
             .err()
             .unwrap()
             .to_string()
-            .contains("PoolTransactionDuplicated"));
+            .contains("PoolRejectedDuplicatedTransaction"));
     }
 }
 
 pub struct DuplicatedTransaction;
 
 impl Spec for DuplicatedTransaction {
-    crate::name!("duplicated_transaction");
-
-    fn run(&self, net: &mut Net) {
-        let node = &net.nodes[0];
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
         let window = node.consensus().tx_proposal_window();
         let start_issue = window.farthest() + 2;
-        node.generate_blocks((start_issue.saturating_sub(node.get_tip_block_number())) as usize);
+        node.mine(start_issue.saturating_sub(node.get_tip_block_number()));
 
         let tx1 = node.new_transaction_spend_tip_cellbase();
 
@@ -54,19 +53,17 @@ impl Spec for DuplicatedTransaction {
             .err()
             .unwrap()
             .to_string()
-            .contains("PoolTransactionDuplicated"));
+            .contains("PoolRejectedDuplicatedTransaction"));
     }
 }
 
 pub struct ConflictInPending;
 
 impl Spec for ConflictInPending {
-    crate::name!("conflict_in_pending");
-
-    fn run(&self, net: &mut Net) {
-        let node = &net.nodes[0];
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
         let window = node.consensus().tx_proposal_window();
-        node.generate_blocks(window.farthest() as usize + 2);
+        node.mine(window.farthest() + 2);
 
         let (txa, txb) = conflict_transactions(node);
         node.submit_transaction(&txa);
@@ -78,19 +75,17 @@ impl Spec for ConflictInPending {
         });
 
         node.submit_block(&commit(node, &[&txa]));
-        node.generate_blocks(window.farthest() as usize);
+        node.mine(window.farthest());
     }
 }
 
 pub struct ConflictInGap;
 
 impl Spec for ConflictInGap {
-    crate::name!("conflict_in_gap");
-
-    fn run(&self, net: &mut Net) {
-        let node = &net.nodes[0];
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
         let window = node.consensus().tx_proposal_window();
-        node.generate_blocks(window.farthest() as usize + 2);
+        node.mine(window.farthest() + 2);
 
         let (txa, txb) = conflict_transactions(node);
         node.submit_transaction(&txa);
@@ -105,37 +100,90 @@ impl Spec for ConflictInGap {
         assert_eq!(&[txa], &block.transactions()[1..]);
 
         node.submit_block(&block);
-        node.generate_blocks(window.farthest() as usize);
+        node.mine(window.farthest());
     }
 }
 
 pub struct ConflictInProposed;
 
 impl Spec for ConflictInProposed {
-    crate::name!("conflict_in_proposed");
-
-    fn run(&self, net: &mut Net) {
-        let node = &net.nodes[0];
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
         let window = node.consensus().tx_proposal_window();
-        node.generate_blocks(window.farthest() as usize + 2);
+        node.mine(window.farthest() + 2);
 
         let (txa, txb) = conflict_transactions(node);
         node.submit_transaction(&txa);
         node.submit_transaction(&txb);
 
         node.submit_block(&propose(node, &[&txa, &txb]));
-        node.generate_blocks(window.farthest() as usize);
+        node.mine(window.farthest());
     }
 }
 
-fn conflict_transactions(node: &Node) -> (TransactionView, TransactionView) {
+pub struct SubmitConflict;
+
+impl Spec for SubmitConflict {
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
+        let window = node.consensus().tx_proposal_window();
+        node.mine(window.farthest() + 2);
+
+        let (txa, txb) = conflict_transactions(node);
+        node.submit_transaction(&txa);
+        node.mine_until_transaction_confirm(&txa.hash());
+        assert!(is_transaction_committed(node, &txa));
+        assert_send_transaction_fail(
+            node,
+            &txb,
+            "TransactionFailedToResolve: Resolve failed Unknown",
+        );
+    }
+}
+
+pub struct RemoveConflictFromPending;
+
+impl Spec for RemoveConflictFromPending {
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
+        let window = node.consensus().tx_proposal_window();
+        node.mine(window.farthest() + 2);
+
+        let (txa, txb) =
+            conflict_transactions_with_capacity(node, Bytes::new(), capacity_bytes!(1000));
+        let txc = node.new_transaction_with_since_capacity(txb.hash(), 0, capacity_bytes!(100));
+        node.submit_transaction(&txa);
+        node.submit_transaction(&txb);
+        node.submit_transaction(&txc);
+
+        assert!(is_transaction_pending(node, &txa));
+        assert!(is_transaction_pending(node, &txb));
+        assert!(is_transaction_pending(node, &txc));
+
+        node.submit_block(&propose(node, &[&txa]));
+        (0..window.closest()).for_each(|_| {
+            node.submit_block(&blank(node));
+        });
+        node.submit_block(&commit(node, &[&txa]));
+        node.wait_for_tx_pool();
+
+        assert!(is_transaction_committed(node, &txa));
+        assert!(is_transaction_rejected(node, &txb));
+        assert!(is_transaction_rejected(node, &txc));
+    }
+}
+
+fn conflict_transactions_with_capacity(
+    node: &Node,
+    output_data: Bytes,
+    cap: Capacity,
+) -> (TransactionView, TransactionView) {
     let txa = node.new_transaction_spend_tip_cellbase();
-    let output_data = Bytes::from(b"b0b".to_vec());
     let output = txa
         .output(0)
         .unwrap()
         .as_builder()
-        .build_exact_capacity(Capacity::bytes(output_data.len()).unwrap())
+        .build_exact_capacity(cap)
         .unwrap();
     let txb = txa
         .as_advanced_builder()
@@ -144,6 +192,12 @@ fn conflict_transactions(node: &Node) -> (TransactionView, TransactionView) {
         .build();
     assert_ne!(txa.hash(), txb.hash());
     (txa, txb)
+}
+
+fn conflict_transactions(node: &Node) -> (TransactionView, TransactionView) {
+    let output_data = Bytes::from(b"b0b".to_vec());
+    let cap = Capacity::bytes(output_data.len()).unwrap();
+    conflict_transactions_with_capacity(node, output_data, cap)
 }
 
 fn cousin_txs_with_same_hash_different_witness_hash(

@@ -1,27 +1,32 @@
 use crate::NetworkState;
 use ckb_logger::{debug, warn};
-use futures::{Async, Future, Stream};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::timer::Interval;
+use futures::Future;
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
+use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 const DEFAULT_DUMP_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
 
+/// Save current peer store data regularly
 pub struct DumpPeerStoreService {
     network_state: Arc<NetworkState>,
-    interval: Interval,
+    interval: Option<Interval>,
 }
 
 impl DumpPeerStoreService {
     pub fn new(network_state: Arc<NetworkState>) -> Self {
         DumpPeerStoreService {
             network_state,
-            interval: Interval::new(Instant::now(), DEFAULT_DUMP_INTERVAL),
+            interval: None,
         }
     }
 
     fn dump_peer_store(&self) {
-        let path = self.network_state.config.peer_store_path().clone();
+        let path = self.network_state.config.peer_store_path();
         self.network_state.with_peer_store_mut(|peer_store| {
             if let Err(err) = peer_store.dump_to_dir(&path) {
                 warn!("Dump peer store error, path: {:?} error: {}", path, err);
@@ -40,27 +45,24 @@ impl Drop for DumpPeerStoreService {
 }
 
 impl Future for DumpPeerStoreService {
-    type Item = ();
-    type Error = ();
+    type Output = ();
 
-    fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
-        loop {
-            match self.interval.poll() {
-                Ok(Async::Ready(Some(_tick))) => {
-                    self.dump_peer_store();
-                }
-                Ok(Async::Ready(None)) => {
-                    warn!("ckb dump peer store service stopped");
-                    return Ok(Async::Ready(()));
-                }
-                Ok(Async::NotReady) => {
-                    return Ok(Async::NotReady);
-                }
-                Err(err) => {
-                    warn!("dump peer store service stopped because: {:?}", err);
-                    return Err(());
-                }
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.interval.is_none() {
+            self.interval = {
+                let mut interval = tokio::time::interval_at(
+                    Instant::now() + DEFAULT_DUMP_INTERVAL,
+                    DEFAULT_DUMP_INTERVAL,
+                );
+                // The dump peer store service does not need to urgently compensate for the missed wake,
+                // just delay behavior is enough
+                interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                Some(interval)
             }
         }
+        while self.interval.as_mut().unwrap().poll_tick(cx).is_ready() {
+            self.dump_peer_store()
+        }
+        Poll::Pending
     }
 }

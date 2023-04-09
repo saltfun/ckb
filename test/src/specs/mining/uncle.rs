@@ -1,7 +1,6 @@
-use crate::{Net, Node, Spec};
+use crate::{Node, Spec};
 use ckb_types::core::{BlockView, EpochNumberWithFraction};
 use ckb_types::prelude::*;
-use log::info;
 
 // Convention:
 //   main-block: a block on the main fork
@@ -12,21 +11,23 @@ use log::info;
 pub struct UncleInheritFromForkBlock;
 
 impl Spec for UncleInheritFromForkBlock {
-    crate::name!("uncle_inherit_from_fork_block");
-
-    crate::setup!(num_nodes: 2, connect_all: false);
+    crate::setup!(num_nodes: 2);
 
     // Case: A uncle inherited from a fork-block in side fork is invalid, because that breaks
-    //       the uncle rule "B1's parent is either B2's ancestor or embedded in B2 or its ancestors
-    //       as an uncle"
-    fn run(&self, net: &mut Net) {
-        let target_node = &net.nodes[0];
-        let feed_node = &net.nodes[1];
+    //       the uncle rule "B1's parent is either B2's ancestor or embedded in B2
+    //       or its ancestors as an uncle"
+    //    1. Build a chain which embedded `uncle` as an uncle;
+    //    2. Force reorg, so that the parent of `uncle` become fork-block;
+    //    3. Submit block with `uncle`, which is inherited from a fork-block, should be failed;
+    //    4. Add all the fork-blocks as uncle blocks into the chain and re-submit block with
+    //       `uncle` should be success
 
-        info!("(1) Build a chain which embedded `uncle` as an uncle");
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let target_node = &nodes[0];
+        let feed_node = &nodes[1];
+
         let uncle = construct_uncle(target_node);
 
-        info!("(2) Force reorg, so that the parent of `uncle` become fork-block");
         let longer_fork = (0..=target_node.get_tip_block_number()).map(|_| {
             let block = feed_node.new_block(None, None, None);
             feed_node.submit_block(&block);
@@ -36,9 +37,6 @@ impl Spec for UncleInheritFromForkBlock {
             target_node.submit_block(&block);
         });
 
-        info!(
-            "(3) Submit block with `uncle`, which is inherited from a fork-block, should be failed"
-        );
         let block = target_node
             .new_block_builder(None, None, None)
             .set_uncles(vec![uncle.as_uncle()])
@@ -46,11 +44,16 @@ impl Spec for UncleInheritFromForkBlock {
         let ret = target_node
             .rpc_client()
             .submit_block("0".to_owned(), block.data().into());
-        assert!(ret.is_err(), "{:?}", ret);
+        assert!(
+            ret.is_err(),
+            "Submit block with uncle inherited from a fork-block should be failed, but got {ret:?}"
+        );
         let err = ret.unwrap_err();
-        assert!(err.to_string().contains("DescendantLimit"), "{:?}", err);
+        assert!(
+            err.to_string().contains("DescendantLimit"),
+            "The result should contain 'DescendantLimit', but got {err:?}"
+        );
 
-        info!("(4) Add all the fork-blocks as uncle blocks into the chain. And now re-submit block with `uncle` should be success");
         until_no_uncles_left(target_node);
         let block = target_node
             .new_block_builder(None, None, None)
@@ -63,19 +66,21 @@ impl Spec for UncleInheritFromForkBlock {
 pub struct UncleInheritFromForkUncle;
 
 impl Spec for UncleInheritFromForkUncle {
-    crate::name!("uncle_inherit_from_fork_uncle");
-
-    crate::setup!(num_nodes: 2, connect_all: false);
+    crate::setup!(num_nodes: 2);
 
     // Case: A uncle inherited from a fork-uncle in side fork is invalid, because that breaks
-    //       the uncle rule "B1's parent is either B2's ancestor or embedded in B2 or its ancestors
-    //       as an uncle"
-    fn run(&self, net: &mut Net) {
-        let target_node = &net.nodes[0];
-        let feed_node = &net.nodes[1];
-        net.exit_ibd_mode();
+    //       the uncle rule "B1's parent is either B2's ancestor or embedded in B2
+    //       or its ancestors as an uncle"
+    //    1. Build a chain which embedded `uncle_parent` as an uncle;
+    //    2. Force reorg, so that `uncle_parent` become a fork-uncle;
+    //    3. Submit block with `uncle`, which is inherited from fork-uncle `uncle_parent`,
+    //       should be failed
+    //    4. Add all the fork-blocks as uncle blocks into the chain and now re-submit block with
+    //       `uncle_child` should be success
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let target_node = &nodes[0];
+        let feed_node = &nodes[1];
 
-        info!("(1) Build a chain which embedded `uncle_parent` as an uncle");
         let uncle_parent = construct_uncle(target_node);
         target_node.submit_block(&uncle_parent);
 
@@ -96,7 +101,6 @@ impl Spec for UncleInheritFromForkUncle {
             )
             .build();
 
-        info!("(2) Force reorg, so that `uncle_parent` become a fork-uncle");
         let longer_fork = (0..=target_node.get_tip_block_number()).map(|_| {
             let block = feed_node.new_block(None, None, None);
             feed_node.submit_block(&block);
@@ -106,7 +110,6 @@ impl Spec for UncleInheritFromForkUncle {
             target_node.submit_block(&block);
         });
 
-        info!("(3) Submit block with `uncle`, which is inherited from fork-uncle `uncle_parent`, should be failed");
         let block = target_node
             .new_block_builder(None, None, None)
             .set_uncles(vec![uncle_child.as_uncle()])
@@ -114,11 +117,16 @@ impl Spec for UncleInheritFromForkUncle {
         let ret = target_node
             .rpc_client()
             .submit_block("0".to_owned(), block.data().into());
-        assert!(ret.is_err(), "{:?}", ret);
+        assert!(
+            ret.is_err(),
+            "Submit block with uncle inherited from a fork-uncle should be failed, but got {ret:?}"
+        );
         let err = ret.unwrap_err();
-        assert!(err.to_string().contains("DescendantLimit"), "{:?}", err);
+        assert!(
+            err.to_string().contains("DescendantLimit"),
+            "The result should contain 'DescendantLimit', but got {err:?}"
+        );
 
-        info!("(4) Add all the fork-blocks as uncle blocks into the chain. And now re-submit block with `uncle_child` should be success");
         until_no_uncles_left(target_node);
         let block = target_node
             .new_block_builder(None, None, None)
@@ -131,11 +139,14 @@ impl Spec for UncleInheritFromForkUncle {
 pub struct PackUnclesIntoEpochStarting;
 
 impl Spec for PackUnclesIntoEpochStarting {
-    crate::name!("pack_uncles_into_epoch_starting");
-
     // Case: Miner should not add uncles into the epoch starting
-    fn run(&self, net: &mut Net) {
-        let node = &net.nodes[0];
+    //    1. Chain grow until CURRENT_EPOCH_END - 1 and submit uncle;
+    //    2. Expect the next mining block(CURRENT_EPOCH_END) contains the uncle;
+    //    3. Submit CURRENT_EPOCH_END block with empty uncles;
+    //    4. Expect the next mining block(NEXT_EPOCH_START) not contains uncle.
+
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
         let uncle = construct_uncle(node);
         let next_epoch_start = {
             let current_epoch = node.rpc_client().get_current_epoch();
@@ -143,37 +154,28 @@ impl Spec for PackUnclesIntoEpochStarting {
         };
         let current_epoch_end = next_epoch_start - 1;
 
-        info!(
-            "(1) Grow until CURRENT_EPOCH_END-1({})",
-            current_epoch_end - 1
-        );
-        node.generate_blocks((current_epoch_end - node.get_tip_block_number() - 1) as usize);
-        assert_eq!(current_epoch_end - 1, node.get_tip_block_number());
-
-        info!("(2) Submit the target uncle");
+        node.mine(current_epoch_end - node.get_tip_block_number() - 1);
         node.submit_block(&uncle);
 
-        info!("(3) Expect the next mining block(CURRENT_EPOCH_END) contains the target uncle");
-        let block = node.new_block(None, None, None);
-        assert_eq!(1, block.uncles().into_iter().count());
+        let block = node.new_block_with_blocking(|template| template.uncles.is_empty());
 
-        // Clear the uncles in the next block, we don't want to pack the target `uncle` now.
-        info!("(4) Submit the next block with empty uncles");
         let block_with_empty_uncles = block.as_advanced_builder().set_uncles(vec![]).build();
         node.submit_block(&block_with_empty_uncles);
 
-        info!("(5) Expect the next mining block(NEXT_EPOCH_START) not contains the target uncle");
         let block = node.new_block(None, None, None);
-        assert_eq!(0, block.uncles().into_iter().count());
+        assert_eq!(
+            0,
+            block.uncles().into_iter().count(),
+            "Next_epoch_start block should not contain the uncle"
+        );
     }
 }
 
 // Convenient way to construct an uncle block
 fn construct_uncle(node: &Node) -> BlockView {
-    node.generate_block(); // Ensure exit IBD mode
-    let uncle = node.construct_uncle();
-    node.generate_block();
-
+    node.mine(1); // Ensure exit IBD mode
+    let (block, uncle) = node.construct_uncle();
+    node.submit_block(&block);
     uncle
 }
 

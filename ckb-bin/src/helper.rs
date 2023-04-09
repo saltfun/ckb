@@ -1,23 +1,16 @@
-use ckb_logger::warn;
-use ckb_util::{parking_lot::deadlock, Condvar, Mutex};
+use ckb_logger::info;
 use std::io::{stdin, stdout, Write};
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 
-pub fn wait_for_exit(exit: Arc<(Mutex<()>, Condvar)>) {
-    // Handle possible exits
-    let e = Arc::<(Mutex<()>, Condvar)>::clone(&exit);
-    let _ = ctrlc::set_handler(move || {
-        e.1.notify_all();
-    });
+#[cfg(not(feature = "deadlock_detection"))]
+pub fn deadlock_detection() {}
 
-    // Wait for signal
-    let mut l = exit.0.lock();
-    exit.1.wait(&mut l);
-}
-
+#[cfg(feature = "deadlock_detection")]
 pub fn deadlock_detection() {
+    use ckb_logger::warn;
+    use ckb_util::parking_lot::deadlock;
+    use std::{thread, time::Duration};
+
+    info!("deadlock_detection enable");
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(10));
         let deadlocks = deadlock::check_deadlock();
@@ -41,11 +34,29 @@ pub fn prompt(msg: &str) -> String {
     let mut stdout = stdout.lock();
     let stdin = stdin();
 
-    write!(stdout, "{}", msg).unwrap();
+    write!(stdout, "{msg}").unwrap();
     stdout.flush().unwrap();
 
     let mut input = String::new();
     let _ = stdin.read_line(&mut input);
 
     input
+}
+
+/// Raise the soft open file descriptor resource limit to the hard resource
+/// limit.
+///
+/// # Panics
+///
+/// Panics if [`libc::getrlimit`], [`libc::setrlimit`], [`libc::sysctl`], [`libc::getrlimit`] or [`libc::setrlimit`]
+/// fail.
+///
+/// darwin_fd_limit exists to work around an issue where launchctl on Mac OS X
+/// defaults the rlimit maxfiles to 256/unlimited. The default soft limit of 256
+/// ends up being far too low for our multithreaded scheduler testing, depending
+/// on the number of cores available.
+pub fn raise_fd_limit() {
+    if let Some(limit) = fdlimit::raise_fd_limit() {
+        info!("raise_fd_limit newly-increased limit: {}", limit);
+    }
 }

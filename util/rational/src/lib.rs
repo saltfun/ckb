@@ -1,12 +1,16 @@
+//! Rational numbers.
 #[cfg(test)]
 mod tests;
 
 use numext_fixed_uint::U256;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::{Add, Div, Mul, Sub};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Represents the ratio `numerator / denominator`, where `numerator` and `denominator` are both
+/// unsigned 256-bit integers.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RationalU256 {
     /// Numerator.
     numer: U256,
@@ -21,6 +25,11 @@ impl fmt::Display for RationalU256 {
 }
 
 impl RationalU256 {
+    /// Creates a new ratio `numer / denom`.
+    ///
+    /// ## Panics
+    ///
+    /// Panics when `denom` is zero.
     #[inline]
     pub fn new(numer: U256, denom: U256) -> RationalU256 {
         if denom.is_zero() {
@@ -31,36 +40,45 @@ impl RationalU256 {
         ret
     }
 
+    /// Creates a new ratio `numer / denom` without checking whether `denom` is zero.
     #[inline]
     pub const fn new_raw(numer: U256, denom: U256) -> RationalU256 {
         RationalU256 { numer, denom }
     }
 
+    /// Creates a new ratio `t / 1`.
     #[inline]
     pub const fn from_u256(t: U256) -> RationalU256 {
         RationalU256::new_raw(t, U256::one())
     }
 
+    /// Tells whether the numerator is zero.
     #[inline]
     pub fn is_zero(&self) -> bool {
         self.numer.is_zero()
     }
 
+    /// Creates a new ratio `0 / 1`.
     #[inline]
     pub const fn zero() -> RationalU256 {
         RationalU256::new_raw(U256::zero(), U256::one())
     }
 
+    /// Creates a new ratio `1 / 1`.
     #[inline]
     pub const fn one() -> RationalU256 {
         RationalU256::new_raw(U256::one(), U256::one())
     }
 
+    /// Rounds down the ratio into an unsigned 256-bit integer.
     #[inline]
     pub fn into_u256(self) -> U256 {
         self.numer / self.denom
     }
 
+    /// Computes `self - rhs` and saturates the result to zero when `self` is less than `rhs`.
+    ///
+    /// Returns `self - rhs` when `self > rhs`, returns zero otherwise.
     #[inline]
     pub fn saturating_sub(self, rhs: RationalU256) -> Self {
         if self.denom == rhs.denom {
@@ -85,6 +103,9 @@ impl RationalU256 {
         }
     }
 
+    /// Computes `self - rhs` and saturates the result to zero when `self` is less than `rhs`.
+    ///
+    /// Returns `self - rhs` when `self > rhs`, returns zero otherwise.
     #[inline]
     pub fn saturating_sub_u256(self, rhs: U256) -> Self {
         let (numer, overflowing) = self.numer.overflowing_sub(&(&self.denom * rhs));
@@ -147,7 +168,7 @@ impl Mul<&U256> for &RationalU256 {
     type Output = RationalU256;
     #[inline]
     fn mul(self, rhs: &U256) -> RationalU256 {
-        let gcd = self.denom.gcd(&rhs);
+        let gcd = self.denom.gcd(rhs);
         RationalU256::new_raw(&self.numer * (rhs.div(&gcd)), (&self.denom).div(gcd))
     }
 }
@@ -204,7 +225,7 @@ impl Div<RationalU256> for &RationalU256 {
 
     #[inline]
     fn div(self, rhs: RationalU256) -> RationalU256 {
-        (&self).div(&rhs)
+        self.div(&rhs)
     }
 }
 
@@ -223,7 +244,7 @@ impl Div<&U256> for &RationalU256 {
 
     #[inline]
     fn div(self, rhs: &U256) -> RationalU256 {
-        let gcd = self.numer.gcd(&rhs);
+        let gcd = self.numer.gcd(rhs);
         RationalU256::new_raw(&self.numer / &gcd, &self.denom * (rhs / gcd))
     }
 }
@@ -365,7 +386,7 @@ impl Sub<RationalU256> for &RationalU256 {
     type Output = RationalU256;
     #[inline]
     fn sub(self, rhs: RationalU256) -> RationalU256 {
-        (&self).sub(&rhs)
+        self.sub(&rhs)
     }
 }
 

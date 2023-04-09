@@ -3,10 +3,11 @@ use super::signature::Signature;
 use super::Message;
 use super::SECP256K1;
 use ckb_fixed_hash::H512;
-use secp256k1::key;
 use secp256k1::Message as SecpMessage;
+use secp256k1::PublicKey;
 use std::{fmt, ops};
 
+/// A Secp256k1 512-bit public key, used for verification of signatures
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct Pubkey {
     inner: H512,
@@ -25,15 +26,18 @@ impl Pubkey {
             temp
         };
 
-        let pubkey = key::PublicKey::from_slice(&prefix_key)?;
+        let pubkey = PublicKey::from_slice(&prefix_key)?;
         let recoverable_signature = signature.to_recoverable()?;
         let signature = recoverable_signature.to_standard();
 
         let message = SecpMessage::from_slice(message.as_bytes())?;
-        context.verify(&message, &signature, &pubkey)?;
+        context.verify_ecdsa(&message, &signature, &pubkey)?;
         Ok(())
     }
 
+    /// Serialize the key as a byte-encoded pair of values.
+    /// In compressed form the y-coordinate is represented by only a single bit,
+    /// as x determines it up to one bit.
     pub fn serialize(&self) -> Vec<u8> {
         // non-compressed key prefix 4
         let prefix_key: [u8; 65] = {
@@ -41,12 +45,13 @@ impl Pubkey {
             temp[1..65].copy_from_slice(self.inner.as_bytes());
             temp
         };
-        let pubkey = key::PublicKey::from_slice(&prefix_key).unwrap();
+        let pubkey = PublicKey::from_slice(&prefix_key).unwrap();
         Vec::from(&pubkey.serialize()[..])
     }
 
+    /// Creates a new Pubkey from a slice
     pub fn from_slice(data: &[u8]) -> Result<Self, Error> {
-        Ok(key::PublicKey::from_slice(data)?.into())
+        Ok(PublicKey::from_slice(data)?.into())
     }
 }
 
@@ -62,12 +67,6 @@ impl From<H512> for Pubkey {
     }
 }
 
-impl Into<H512> for Pubkey {
-    fn into(self) -> H512 {
-        self.inner
-    }
-}
-
 impl ops::Deref for Pubkey {
     type Target = H512;
 
@@ -76,8 +75,8 @@ impl ops::Deref for Pubkey {
     }
 }
 
-impl From<key::PublicKey> for Pubkey {
-    fn from(key: key::PublicKey) -> Self {
+impl From<PublicKey> for Pubkey {
+    fn from(key: PublicKey) -> Self {
         let serialized = key.serialize_uncompressed();
         let mut pubkey = [0u8; 64];
         pubkey.copy_from_slice(&serialized[1..65]);

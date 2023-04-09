@@ -1,11 +1,13 @@
 [package]
 name = "ckb-fixed-hash"
-version = "0.25.0-pre"
+version = "0.110.0-pre"
 license = "MIT"
 authors = ["Nervos <dev@nervos.org>"]
-edition = "2018"
+edition = "2021"
+description = "Provide several simple fixed-sized hash data type and their static constructors."
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
 
 [dependencies]
-ckb-fixed-hash-core = { path = "core" }
-ckb-fixed-hash-hack = { path = "hack" }
-proc-macro-hack = "0.5"
+ckb-fixed-hash-core = { path = "core", version = "= 0.110.0-pre" }
+ckb-fixed-hash-macros = { path = "macros", version = "= 0.110.0-pre" }

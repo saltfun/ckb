@@ -10,6 +10,12 @@ use crate::{
  * Definitions
  */
 
+/// An advanced builder for [`TransactionView`].
+///
+/// Base on [`packed::TransactionBuilder`] but added lots of syntactic sugar.
+///
+/// [`TransactionView`]: struct.TransactionView.html
+/// [`packed::TransactionBuilder`]: ../packed/struct.TransactionBuilder.html
 #[derive(Clone, Debug)]
 pub struct TransactionBuilder {
     pub(crate) version: packed::Uint32,
@@ -21,6 +27,12 @@ pub struct TransactionBuilder {
     pub(crate) outputs_data: Vec<packed::Bytes>,
 }
 
+/// An advanced builder for [`HeaderView`].
+///
+/// Base on [`packed::HeaderBuilder`] but added lots of syntactic sugar.
+///
+/// [`HeaderView`]: struct.HeaderView.html
+/// [`packed::HeaderBuilder`]: ../packed/struct.HeaderBuilder.html
 #[derive(Clone, Debug)]
 pub struct HeaderBuilder {
     // RawHeader
@@ -31,13 +43,19 @@ pub struct HeaderBuilder {
     pub(crate) transactions_root: packed::Byte32,
     pub(crate) proposals_hash: packed::Byte32,
     pub(crate) compact_target: packed::Uint32,
-    pub(crate) uncles_hash: packed::Byte32,
+    pub(crate) extra_hash: packed::Byte32,
     pub(crate) epoch: packed::Uint64,
     pub(crate) dao: packed::Byte32,
     // Nonce
     pub(crate) nonce: packed::Uint128,
 }
 
+/// An advanced builder for [`BlockView`].
+///
+/// Base on [`packed::BlockBuilder`] but added lots of syntactic sugar.
+///
+/// [`BlockView`]: struct.BlockView.html
+/// [`packed::BlockBuilder`]: ../packed/struct.BlockBuilder.html
 #[derive(Clone, Debug, Default)]
 pub struct BlockBuilder {
     pub(crate) header: HeaderBuilder,
@@ -45,6 +63,7 @@ pub struct BlockBuilder {
     pub(crate) uncles: Vec<core::UncleBlockView>,
     pub(crate) transactions: Vec<core::TransactionView>,
     pub(crate) proposals: Vec<packed::ProposalShortId>,
+    pub(crate) extension: Option<packed::Bytes>,
 }
 
 /*
@@ -75,8 +94,8 @@ impl ::std::default::Default for HeaderBuilder {
             transactions_root: Default::default(),
             proposals_hash: Default::default(),
             compact_target: DIFF_TWO.pack(),
-            uncles_hash: Default::default(),
-            epoch: Default::default(),
+            extra_hash: Default::default(),
+            epoch: core::EpochNumberWithFraction::new_unchecked(0, 0, 0).pack(),
             dao: Default::default(),
             nonce: Default::default(),
         }
@@ -88,58 +107,90 @@ impl ::std::default::Default for HeaderBuilder {
  */
 
 macro_rules! def_setter_simple {
-    ($prefix:ident, $field:ident, $type:ident) => {
+    (__add_doc, $prefix:ident, $field:ident, $type:ident, $comment:expr) => {
+        #[doc = $comment]
         pub fn $field(mut self, v: packed::$type) -> Self {
             self.$prefix.$field = v;
             self
         }
     };
-    ($field:ident, $type:ident) => {
+    (__add_doc, $field:ident, $type:ident, $comment:expr) => {
+        #[doc = $comment]
         pub fn $field(mut self, v: packed::$type) -> Self {
             self.$field = v;
             self
         }
     };
+    ($prefix:ident, $field:ident, $type:ident) => {
+        def_setter_simple!(
+            __add_doc,
+            $prefix,
+            $field,
+            $type,
+            concat!("Sets `", stringify!($prefix), ".", stringify!($field), "`.")
+        );
+    };
+    ($field:ident, $type:ident) => {
+        def_setter_simple!(
+            __add_doc,
+            $field,
+            $type,
+            concat!("Sets `", stringify!($field), "`.")
+        );
+    };
 }
 
 macro_rules! def_setter_for_vector {
-    ($field:ident, $type:ident, $func_push:ident, $func_extend:ident, $func_set:ident) => {
-        pub fn $func_push(mut self, v: packed::$type) -> Self {
+    (
+        $prefix:ident, $field:ident, $type:ident,
+        $func_push:ident, $func_extend:ident, $func_set:ident,
+        $comment_push:expr, $comment_extend:expr, $comment_set:expr,
+    ) => {
+        #[doc = $comment_push]
+        pub fn $func_push(mut self, v: $prefix::$type) -> Self {
             self.$field.push(v);
             self
         }
+        #[doc = $comment_extend]
         pub fn $func_extend<T>(mut self, v: T) -> Self
         where
-            T: ::std::iter::IntoIterator<Item = packed::$type>
+            T: ::std::iter::IntoIterator<Item = $prefix::$type>,
         {
             self.$field.extend(v);
             self
         }
-        pub fn $func_set(mut self, v: Vec<packed::$type>) -> Self {
-            self.$field= v;
+        #[doc = $comment_set]
+        pub fn $func_set(mut self, v: Vec<$prefix::$type>) -> Self {
+            self.$field = v;
             self
         }
-    }
+    };
+    ($prefix:ident, $field:ident, $type:ident, $func_push:ident, $func_extend:ident, $func_set:ident) => {
+        def_setter_for_vector!(
+            $prefix,
+            $field,
+            $type,
+            $func_push,
+            $func_extend,
+            $func_set,
+            concat!("Pushes an item into `", stringify!($field), "`."),
+            concat!(
+                "Extends `",
+                stringify!($field),
+                "` with the contents of an iterator."
+            ),
+            concat!("Sets `", stringify!($field), "`."),
+        );
+    };
+    ($field:ident, $type:ident, $func_push:ident, $func_extend:ident, $func_set:ident) => {
+        def_setter_for_vector!(packed, $field, $type, $func_push, $func_extend, $func_set);
+    };
 }
 
 macro_rules! def_setter_for_view_vector {
     ($field:ident, $type:ident, $func_push:ident, $func_extend:ident, $func_set:ident) => {
-        pub fn $func_push(mut self, v: core::$type) -> Self {
-            self.$field.push(v);
-            self
-        }
-        pub fn $func_extend<T>(mut self, v: T) -> Self
-        where
-            T: ::std::iter::IntoIterator<Item = core::$type>
-        {
-            self.$field.extend(v);
-            self
-        }
-        pub fn $func_set(mut self, v: Vec<core::$type>) -> Self {
-            self.$field= v;
-            self
-        }
-    }
+        def_setter_for_vector!(core, $field, $type, $func_push, $func_extend, $func_set);
+    };
 }
 
 impl TransactionBuilder {
@@ -163,6 +214,7 @@ impl TransactionBuilder {
         set_outputs_data
     );
 
+    /// Converts into [`TransactionView`](struct.TransactionView.html).
     pub fn build(self) -> core::TransactionView {
         let Self {
             version,
@@ -203,11 +255,12 @@ impl HeaderBuilder {
     def_setter_simple!(transactions_root, Byte32);
     def_setter_simple!(proposals_hash, Byte32);
     def_setter_simple!(compact_target, Uint32);
-    def_setter_simple!(uncles_hash, Byte32);
+    def_setter_simple!(extra_hash, Byte32);
     def_setter_simple!(epoch, Uint64);
     def_setter_simple!(dao, Byte32);
     def_setter_simple!(nonce, Uint128);
 
+    /// Converts into [`HeaderView`](struct.HeaderView.html).
     pub fn build(self) -> core::HeaderView {
         let Self {
             version,
@@ -217,7 +270,7 @@ impl HeaderBuilder {
             transactions_root,
             proposals_hash,
             compact_target,
-            uncles_hash,
+            extra_hash,
             epoch,
             dao,
             nonce,
@@ -225,6 +278,12 @@ impl HeaderBuilder {
         debug_assert!(
             Unpack::<u32>::unpack(&compact_target) > 0,
             "[HeaderBuilder] compact_target should greater than zero"
+        );
+        debug_assert!(
+            Unpack::<core::BlockNumber>::unpack(&number) == 0
+                || Unpack::<core::EpochNumberWithFraction>::unpack(&epoch).is_well_formed(),
+            "[HeaderBuilder] epoch {epoch:x} should be well formed, \
+            unless it's in the genesis block (number: {number:x})"
         );
         let raw = packed::RawHeader::new_builder()
             .version(version)
@@ -234,7 +293,7 @@ impl HeaderBuilder {
             .transactions_root(transactions_root)
             .proposals_hash(proposals_hash)
             .compact_target(compact_target)
-            .uncles_hash(uncles_hash)
+            .extra_hash(extra_hash)
             .epoch(epoch)
             .dao(dao)
             .build();
@@ -252,7 +311,7 @@ impl BlockBuilder {
     def_setter_simple!(header, transactions_root, Byte32);
     def_setter_simple!(header, proposals_hash, Byte32);
     def_setter_simple!(header, compact_target, Uint32);
-    def_setter_simple!(header, uncles_hash, Byte32);
+    def_setter_simple!(header, extra_hash, Byte32);
     def_setter_simple!(header, epoch, Uint64);
     def_setter_simple!(header, dao, Byte32);
     def_setter_simple!(header, nonce, Uint128);
@@ -272,8 +331,16 @@ impl BlockBuilder {
         set_proposals
     );
 
+    /// Set `header`.
     pub fn header(mut self, header: core::HeaderView) -> Self {
         self.header = header.as_advanced_builder();
+        self
+    }
+
+    /// Set `extension`.
+    #[doc(hidden)]
+    pub fn extension(mut self, extension: Option<packed::Bytes>) -> Self {
+        self.extension = extension;
         self
     }
 
@@ -283,6 +350,7 @@ impl BlockBuilder {
             uncles,
             transactions,
             proposals,
+            extension,
         } = self;
         let (uncles, uncle_hashes) = {
             let len = uncles.len();
@@ -337,22 +405,37 @@ impl BlockBuilder {
             let witnesses_root = merkle_root(&tx_witness_hashes[..]);
             let transactions_root = merkle_root(&[raw_transactions_root, witnesses_root]);
             let proposals_hash = proposals.calc_proposals_hash();
-            let uncles_hash = uncles.calc_uncles_hash();
+            let extra_hash_view = core::ExtraHashView::new(
+                uncles.calc_uncles_hash(),
+                extension.as_ref().map(packed::Bytes::calc_raw_data_hash),
+            );
+            let extra_hash = extra_hash_view.extra_hash();
             header
                 .transactions_root(transactions_root)
                 .proposals_hash(proposals_hash)
-                .uncles_hash(uncles_hash)
+                .extra_hash(extra_hash)
                 .build()
         } else {
             header.build()
         };
 
-        let block = packed::Block::new_builder()
-            .header(data)
-            .uncles(uncles)
-            .transactions(transactions.pack())
-            .proposals(proposals)
-            .build();
+        let block = if let Some(extension) = extension {
+            packed::BlockV1::new_builder()
+                .header(data)
+                .uncles(uncles)
+                .transactions(transactions.pack())
+                .proposals(proposals)
+                .extension(extension)
+                .build()
+                .as_v0()
+        } else {
+            packed::Block::new_builder()
+                .header(data)
+                .uncles(uncles)
+                .transactions(transactions.pack())
+                .proposals(proposals)
+                .build()
+        };
         core::BlockView {
             data: block,
             hash,
@@ -362,10 +445,19 @@ impl BlockBuilder {
         }
     }
 
+    /// Converts into [`BlockView`](struct.BlockView.html) and recalculates all hashes and merkle
+    /// roots in the header.
     pub fn build(self) -> core::BlockView {
         self.build_internal(true)
     }
 
+    /// Converts into [`BlockView`](struct.BlockView.html) but does not refresh all hashes and all
+    /// merkle roots in the header.
+    ///
+    /// # Notice
+    ///
+    /// [`BlockView`](struct.BlockView.html) created by this method could have invalid hashes or
+    /// invalid merkle roots in the header.
     pub fn build_unchecked(self) -> core::BlockView {
         self.build_internal(false)
     }
@@ -376,6 +468,7 @@ impl BlockBuilder {
  */
 
 impl packed::Transaction {
+    /// Creates an advanced builder base on current data.
     pub fn as_advanced_builder(&self) -> TransactionBuilder {
         TransactionBuilder::default()
             .version(self.raw().version())
@@ -389,6 +482,7 @@ impl packed::Transaction {
 }
 
 impl packed::Header {
+    /// Creates an advanced builder base on current data.
     pub fn as_advanced_builder(&self) -> HeaderBuilder {
         HeaderBuilder::default()
             .version(self.raw().version())
@@ -398,7 +492,7 @@ impl packed::Header {
             .transactions_root(self.raw().transactions_root())
             .proposals_hash(self.raw().proposals_hash())
             .compact_target(self.raw().compact_target())
-            .uncles_hash(self.raw().uncles_hash())
+            .extra_hash(self.raw().extra_hash())
             .epoch(self.raw().epoch())
             .dao(self.raw().dao())
             .nonce(self.nonce())
@@ -406,6 +500,12 @@ impl packed::Header {
 }
 
 impl packed::Block {
+    /// Creates an empty advanced builder.
+    pub fn new_advanced_builder() -> BlockBuilder {
+        Default::default()
+    }
+
+    /// Creates an advanced builder base on current data.
     pub fn as_advanced_builder(&self) -> BlockBuilder {
         BlockBuilder::default()
             .header(self.header().into_view())
@@ -422,22 +522,41 @@ impl packed::Block {
                     .collect::<Vec<_>>(),
             )
             .proposals(self.proposals().into_iter().collect::<Vec<_>>())
+            .extension(self.extension())
     }
 }
 
 impl core::TransactionView {
+    /// Creates an empty advanced builder.
+    pub fn new_advanced_builder() -> TransactionBuilder {
+        Default::default()
+    }
+
+    /// Creates an advanced builder base on current data.
     pub fn as_advanced_builder(&self) -> TransactionBuilder {
         self.data().as_advanced_builder()
     }
 }
 
 impl core::HeaderView {
+    /// Creates an empty advanced builder.
+    pub fn new_advanced_builder() -> HeaderBuilder {
+        Default::default()
+    }
+
+    /// Creates an advanced builder base on current data.
     pub fn as_advanced_builder(&self) -> HeaderBuilder {
         self.data().as_advanced_builder()
     }
 }
 
 impl core::BlockView {
+    /// Creates an empty advanced builder.
+    pub fn new_advanced_builder() -> BlockBuilder {
+        Default::default()
+    }
+
+    /// Creates an advanced builder base on current data.
     pub fn as_advanced_builder(&self) -> BlockBuilder {
         let core::BlockView {
             data,
@@ -452,7 +571,7 @@ impl core::BlockView {
             .uncles(
                 data.uncles()
                     .into_iter()
-                    .zip(uncle_hashes.to_owned().into_iter())
+                    .zip(uncle_hashes.clone().into_iter())
                     .map(|(data, hash)| core::UncleBlockView { data, hash })
                     .collect::<Vec<_>>(),
             )
@@ -469,5 +588,6 @@ impl core::BlockView {
                     .collect::<Vec<_>>(),
             )
             .proposals(data.proposals().into_iter().collect::<Vec<_>>())
+            .extension(data.extension())
     }
 }

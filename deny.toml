@@ -1,0 +1,52 @@
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "deny"
+notice = "deny"
+ignore = [
+    # TODO Potential segfault in the time crate; waiting for the fix from upstream (chrono)
+    "RUSTSEC-2020-0071",
+    # TODO Potential segfault in the chrono crate; waiting for the new release of chrono
+    "RUSTSEC-2020-0159"
+]
+
+[licenses]
+unlicensed = "deny"
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    # https://softwareengineering.stackexchange.com/questions/317944/can-i-include-code-licensed-under-mpl-within-a-project-under-mit-license
+    "MPL-2.0",
+]
+copyleft = "deny"
+default = "deny"
+exceptions = [
+    { allow = ["MIT", "ISC", "OpenSSL"], name = "ring", version = "*" },
+]
+
+[[licenses.clarify]]
+name = "ring"
+version = "*"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 }
+]
+
+[[licenses.clarify]]
+name = "encoding_rs"
+version = "*"
+expression = "(Apache-2.0 OR MIT) AND BSD-3-Clause"
+license-files = [
+    { path = "COPYRIGHT", hash = 0x39f8ad31 }
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

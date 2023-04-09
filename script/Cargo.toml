@@ -1,35 +1,41 @@
 [package]
 name = "ckb-script"
-version = "0.25.0-pre"
+version = "0.110.0-pre"
 license = "MIT"
 authors = ["Nervos Core Dev <dev@nervos.org>"]
-edition = "2018"
+edition = "2021"
 build = "build.rs"
+description = "CKB component to run the type/lock scripts."
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
 
 [features]
-default = ["logging", "asm"]
+default = ["logging", "detect-asm"]
 
 asm = ["ckb-vm/asm"]
+detect-asm = ["ckb-vm/detect-asm"]
 logging = ["ckb-logger"]
+flatmemory = []
 
 [dependencies]
-ckb-script-data-loader = { path = "data-loader" }
+ckb-traits = { path = "../traits", version = "= 0.110.0-pre" }
 byteorder = "1.3.1"
-ckb-types = {path = "../util/types"}
-ckb-hash = {path = "../util/hash"}
-ckb-vm = { version = "0.18.0", default-features = false }
-faster-hex = "0.4"
-ckb-logger = { path = "../util/logger", optional = true }
-serde = "1.0"
-serde_derive = "1.0"
-ckb-error = { path = "../error" }
-failure = "0.1.5"
-ckb-chain-spec = { path = "../spec" }
+ckb-types = { path = "../util/types", version = "= 0.110.0-pre" }
+ckb-hash = { path = "../util/hash", version = "= 0.110.0-pre" }
+ckb-vm = { version = "=0.23.2", default-features = false }
+faster-hex = "0.6"
+ckb-logger = { path = "../util/logger", version = "= 0.110.0-pre", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+ckb-error = { path = "../error", version = "= 0.110.0-pre" }
+ckb-chain-spec = { path = "../spec", version = "= 0.110.0-pre" }
 
 [dev-dependencies]
-proptest = "0.9"
-ckb-db = { path = "../db" }
-ckb-store = { path = "../store" }
-ckb-test-chain-utils = { path = "../util/test-chain-utils" }
-tiny-keccak = "1.4"
-ckb-crypto = { path = "../util/crypto"}
+proptest = "1.0"
+ckb-db = { path = "../db", version = "= 0.110.0-pre" }
+ckb-store = { path = "../store", version = "= 0.110.0-pre" }
+ckb-test-chain-utils = { path = "../util/test-chain-utils", version = "= 0.110.0-pre" }
+tiny-keccak = { version = "2.0", features = ["sha3"] }
+ckb-crypto = { path = "../util/crypto", version = "= 0.110.0-pre" }
+ckb-db-schema = { path = "../db-schema", version = "= 0.110.0-pre" }
+tempfile.workspace = true
+rand = "0.8.4"

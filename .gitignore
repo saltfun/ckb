@@ -40,6 +40,7 @@ tags
 # runtime folder
 /ckb.toml
 /ckb-miner.toml
+/default.db-options
 /data
 /specs
 /ckb-dev
@@ -48,6 +49,10 @@ tags
 
 # tmp files
 *.pyc
+/test/integration.log
+/test/integration.failure
+cargo-publish.log
+*.bak
 
 # generated files
 cobertura.xml
@@ -55,3 +60,8 @@ cobertura.xml
 
 # proptest
 **/proptest-regressions
+
+# generated coverage report files
+*.profraw
+lcov-unit-test.info
+lcov-integration-test.info

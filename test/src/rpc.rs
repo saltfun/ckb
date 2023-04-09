@@ -3,24 +3,22 @@ mod id_generator;
 mod macros;
 mod error;
 
+use ckb_error::AnyError;
 use ckb_jsonrpc_types::{
-    Alert, BannedAddr, Block, BlockNumber, BlockReward, BlockTemplate, BlockView, Capacity,
-    CellOutputWithOutPoint, CellTransaction, CellWithStatus, ChainInfo, Cycle, DryRunResult,
-    EpochNumber, EpochView, EstimateResult, HeaderView, LiveCell, LockHashIndexState, Node,
-    OutPoint, PeerState, Timestamp, Transaction, TransactionWithStatus, TxPoolInfo, Uint64,
-    Version,
+    Alert, BannedAddr, Block, BlockEconomicState, BlockFilter, BlockNumber, BlockTemplate,
+    BlockView, Capacity, CellWithStatus, ChainInfo, EpochNumber, EpochView, EstimateCycles,
+    HeaderView, LocalNode, OutPoint, RawTxPool, RemoteNode, Timestamp, Transaction,
+    TransactionProof, TransactionWithStatusResponse, TxPoolInfo, Uint32, Uint64, Version,
 };
 use ckb_types::core::{
     BlockNumber as CoreBlockNumber, Capacity as CoreCapacity, EpochNumber as CoreEpochNumber,
     Version as CoreVersion,
 };
 use ckb_types::{packed::Byte32, prelude::*, H256};
-use failure::Error;
 use lazy_static::lazy_static;
 
 lazy_static! {
-    pub static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::builder()
-        .gzip(true)
+    pub static ref HTTP_CLIENT: reqwest::blocking::Client = reqwest::blocking::Client::builder()
         .timeout(::std::time::Duration::from_secs(30))
         .build()
         .expect("reqwest Client build");
@@ -71,9 +69,23 @@ impl RpcClient {
             .expect("rpc call get_header_by_number")
     }
 
-    pub fn get_transaction(&self, hash: Byte32) -> Option<TransactionWithStatus> {
+    pub fn get_block_filter(&self, hash: Byte32) -> Option<BlockFilter> {
         self.inner
-            .get_transaction(hash.unpack())
+            .get_block_filter(hash.unpack())
+            .expect("rpc call get_block_filter")
+    }
+
+    pub fn get_transaction(&self, hash: Byte32) -> TransactionWithStatusResponse {
+        self.get_transaction_with_verbosity(hash, 2)
+    }
+
+    pub fn get_transaction_with_verbosity(
+        &self,
+        hash: Byte32,
+        verbosity: u32,
+    ) -> TransactionWithStatusResponse {
+        self.inner
+            .get_transaction(hash.unpack(), Some(verbosity.into()))
             .expect("rpc call get_transaction")
     }
 
@@ -87,18 +99,7 @@ impl RpcClient {
     pub fn get_tip_header(&self) -> HeaderView {
         self.inner
             .get_tip_header()
-            .expect("rpc call get_block_hash")
-    }
-
-    pub fn get_cells_by_lock_hash(
-        &self,
-        lock_hash: Byte32,
-        from: CoreBlockNumber,
-        to: CoreBlockNumber,
-    ) -> Vec<CellOutputWithOutPoint> {
-        self.inner
-            .get_cells_by_lock_hash(lock_hash.unpack(), from.into(), to.into())
-            .expect("rpc call get_cells_by_lock_hash")
+            .expect("rpc call get_tip_header")
     }
 
     pub fn get_live_cell(&self, out_point: OutPoint, with_data: bool) -> CellWithStatus {
@@ -126,13 +127,13 @@ impl RpcClient {
             .expect("rpc call get_epoch_by_number")
     }
 
-    pub fn local_node_info(&self) -> Node {
+    pub fn local_node_info(&self) -> LocalNode {
         self.inner
             .local_node_info()
             .expect("rpc call local_node_info")
     }
 
-    pub fn get_peers(&self) -> Vec<Node> {
+    pub fn get_peers(&self) -> Vec<RemoteNode> {
         self.inner.get_peers().expect("rpc call get_peers")
     }
 
@@ -140,6 +141,12 @@ impl RpcClient {
         self.inner
             .get_banned_addresses()
             .expect("rpc call get_banned_addresses")
+    }
+
+    pub fn clear_banned_addresses(&self) {
+        self.inner
+            .clear_banned_addresses()
+            .expect("rpc call clear_banned_addresses")
     }
 
     pub fn set_ban(
@@ -169,7 +176,7 @@ impl RpcClient {
             .expect("rpc call get_block_template")
     }
 
-    pub fn submit_block(&self, work_id: String, block: Block) -> Result<Byte32, Error> {
+    pub fn submit_block(&self, work_id: String, block: Block) -> Result<Byte32, AnyError> {
         self.inner.submit_block(work_id, block).map(|x| x.pack())
     }
 
@@ -179,25 +186,39 @@ impl RpcClient {
             .expect("rpc call get_blockchain_info")
     }
 
-    pub fn send_transaction(&self, tx: Transaction) -> Byte32 {
+    pub fn get_block_median_time(&self, block_hash: Byte32) -> Option<Timestamp> {
         self.inner
-            .send_transaction(tx)
+            .get_block_median_time(block_hash.unpack())
+            .expect("rpc call get_block_median_time")
+    }
+
+    pub fn send_transaction(&self, tx: Transaction) -> Byte32 {
+        self.send_transaction_result(tx)
             .expect("rpc call send_transaction")
             .pack()
     }
 
-    pub fn send_transaction_result(&self, tx: Transaction) -> Result<H256, Error> {
-        self.inner.send_transaction(tx)
-    }
-
-    pub fn dry_run_transaction(&self, tx: Transaction) -> DryRunResult {
+    pub fn send_transaction_result(&self, tx: Transaction) -> Result<H256, AnyError> {
         self.inner
-            .dry_run_transaction(tx)
-            .expect("rpc call dry_run_transaction")
+            .send_transaction(tx, Some("passthrough".to_string()))
     }
 
-    pub fn broadcast_transaction(&self, tx: Transaction, cycles: Cycle) -> Result<H256, Error> {
-        self.inner.broadcast_transaction(tx, cycles)
+    pub fn remove_transaction(&self, tx_hash: Byte32) -> bool {
+        self.inner
+            .remove_transaction(tx_hash.unpack())
+            .expect("rpc call remove_transaction")
+    }
+
+    pub fn get_raw_tx_pool(&self, verbose: Option<bool>) -> RawTxPool {
+        self.inner
+            .get_raw_tx_pool(verbose)
+            .expect("rpc call get_raw_tx_pool")
+    }
+
+    pub fn estimate_cycles(&self, tx: Transaction) -> EstimateCycles {
+        self.inner
+            .estimate_cycles(tx)
+            .expect("rpc call estimate_cycles")
     }
 
     pub fn send_alert(&self, alert: Alert) {
@@ -220,67 +241,31 @@ impl RpcClient {
             .expect("rpc call remove_node")
     }
 
-    pub fn process_block_without_verify(&self, block: Block) -> Option<Byte32> {
+    pub fn process_block_without_verify(&self, block: Block, broadcast: bool) -> Option<Byte32> {
         self.inner
-            .process_block_without_verify(block)
+            .process_block_without_verify(block, broadcast)
             .expect("rpc call process_block_without verify")
             .map(|x| x.pack())
     }
 
-    pub fn get_live_cells_by_lock_hash(
-        &self,
-        lock_hash: Byte32,
-        page: u64,
-        per_page: u64,
-        reverse_order: Option<bool>,
-    ) -> Vec<LiveCell> {
+    pub fn truncate(&self, target_tip_hash: Byte32) {
         self.inner()
-            .get_live_cells_by_lock_hash(
-                lock_hash.unpack(),
-                page.into(),
-                per_page.into(),
-                reverse_order,
-            )
-            .expect("rpc call get_live_cells_by_lock_hash")
+            .truncate(target_tip_hash.unpack())
+            .expect("rpc call truncate")
     }
 
-    pub fn get_transactions_by_lock_hash(
-        &self,
-        lock_hash: Byte32,
-        page: u64,
-        per_page: u64,
-        reverse_order: Option<bool>,
-    ) -> Vec<CellTransaction> {
+    pub fn generate_block(&self) -> Byte32 {
         self.inner()
-            .get_transactions_by_lock_hash(
-                lock_hash.unpack(),
-                page.into(),
-                per_page.into(),
-                reverse_order,
-            )
-            .expect("rpc call get_transactions_by_lock_hash")
+            .generate_block()
+            .expect("rpc call generate_block")
+            .pack()
     }
 
-    pub fn index_lock_hash(
-        &self,
-        lock_hash: Byte32,
-        index_from: Option<CoreBlockNumber>,
-    ) -> LockHashIndexState {
+    pub fn generate_block_with_template(&self, block_template: BlockTemplate) -> Byte32 {
         self.inner()
-            .index_lock_hash(lock_hash.unpack(), index_from.map(Into::into))
-            .expect("rpc call index_lock_hash")
-    }
-
-    pub fn deindex_lock_hash(&self, lock_hash: Byte32) {
-        self.inner()
-            .deindex_lock_hash(lock_hash.unpack())
-            .expect("rpc call deindex_lock_hash")
-    }
-
-    pub fn get_lock_hash_index_states(&self) -> Vec<LockHashIndexState> {
-        self.inner()
-            .get_lock_hash_index_states()
-            .expect("rpc call get_lock_hash_index_states")
+            .generate_block_with_template(block_template)
+            .expect("rpc call generate_block_with_template")
+            .pack()
     }
 
     pub fn calculate_dao_maximum_withdraw(
@@ -294,16 +279,23 @@ impl RpcClient {
             .into()
     }
 
-    pub fn get_cellbase_output_capacity_details(&self, hash: Byte32) -> Option<BlockReward> {
+    pub fn get_block_economic_state(&self, hash: Byte32) -> Option<BlockEconomicState> {
         self.inner()
-            .get_cellbase_output_capacity_details(hash.unpack())
-            .expect("rpc call get_cellbase_output_capacity_details")
+            .get_block_economic_state(hash.unpack())
+            .expect("rpc call get_block_economic_state")
     }
 
-    pub fn estimate_fee_rate(&self, expect_confirm_blocks: Uint64) -> EstimateResult {
+    pub fn notify_transaction(&self, tx: Transaction) -> Byte32 {
         self.inner()
-            .estimate_fee_rate(expect_confirm_blocks)
-            .expect("rpc call estimate_fee_rate")
+            .notify_transaction(tx)
+            .expect("rpc call send_transaction")
+            .pack()
+    }
+
+    pub fn tx_pool_ready(&self) -> bool {
+        self.inner()
+            .tx_pool_ready()
+            .expect("rpc call tx_pool_ready")
     }
 }
 
@@ -313,22 +305,17 @@ jsonrpc!(pub struct Inner {
     pub fn get_block_by_number(&self, _number: BlockNumber) -> Option<BlockView>;
     pub fn get_header(&self, _hash: H256) -> Option<HeaderView>;
     pub fn get_header_by_number(&self, _number: BlockNumber) -> Option<HeaderView>;
-    pub fn get_transaction(&self, _hash: H256) -> Option<TransactionWithStatus>;
+    pub fn get_block_filter(&self, _hash: H256) -> Option<BlockFilter>;
+    pub fn get_transaction(&self, _hash: H256, verbosity: Option<Uint32>) -> TransactionWithStatusResponse;
     pub fn get_block_hash(&self, _number: BlockNumber) -> Option<H256>;
     pub fn get_tip_header(&self) -> HeaderView;
-    pub fn get_cells_by_lock_hash(
-        &self,
-        _lock_hash: H256,
-        _from: BlockNumber,
-        _to: BlockNumber
-    ) -> Vec<CellOutputWithOutPoint>;
     pub fn get_live_cell(&self, _out_point: OutPoint, _with_data: bool) -> CellWithStatus;
     pub fn get_tip_block_number(&self) -> BlockNumber;
     pub fn get_current_epoch(&self) -> EpochView;
     pub fn get_epoch_by_number(&self, number: EpochNumber) -> Option<EpochView>;
 
-    pub fn local_node_info(&self) -> Node;
-    pub fn get_peers(&self) -> Vec<Node>;
+    pub fn local_node_info(&self) -> LocalNode;
+    pub fn get_peers(&self) -> Vec<RemoteNode>;
     pub fn get_banned_addresses(&self) -> Vec<BannedAddr>;
     pub fn set_ban(
         &self,
@@ -338,6 +325,7 @@ jsonrpc!(pub struct Inner {
         absolute: Option<bool>,
         reason: Option<String>
     ) -> ();
+    pub fn clear_banned_addresses(&self) -> ();
 
     pub fn get_block_template(
         &self,
@@ -347,25 +335,26 @@ jsonrpc!(pub struct Inner {
     ) -> BlockTemplate;
     pub fn submit_block(&self, _work_id: String, _data: Block) -> H256;
     pub fn get_blockchain_info(&self) -> ChainInfo;
-    pub fn get_peers_state(&self) -> Vec<PeerState>;
-    pub fn compute_transaction_hash(&self, tx: Transaction) -> H256;
-    pub fn dry_run_transaction(&self, _tx: Transaction) -> DryRunResult;
-    pub fn send_transaction(&self, tx: Transaction) -> H256;
+    pub fn get_block_median_time(&self, block_hash: H256) -> Option<Timestamp>;
+    pub fn estimate_cycles(&self, _tx: Transaction) -> EstimateCycles;
+    pub fn send_transaction(&self, tx: Transaction, outputs_validator: Option<String>) -> H256;
+    pub fn remove_transaction(&self, tx_hash: H256) -> bool;
     pub fn tx_pool_info(&self) -> TxPoolInfo;
+    pub fn get_raw_tx_pool(&self, verbose: Option<bool>) -> RawTxPool;
 
     pub fn send_alert(&self, alert: Alert) -> ();
 
     pub fn add_node(&self, peer_id: String, address: String) -> ();
     pub fn remove_node(&self, peer_id: String) -> ();
-    pub fn process_block_without_verify(&self, _data: Block) -> Option<H256>;
+    pub fn process_block_without_verify(&self, _data: Block, broadcast: bool) -> Option<H256>;
+    pub fn truncate(&self, target_tip_hash: H256) -> ();
+    pub fn generate_block(&self) -> H256;
+    pub fn generate_block_with_template(&self, block_template: BlockTemplate) -> H256;
 
-    pub fn get_live_cells_by_lock_hash(&self, lock_hash: H256, page: Uint64, per_page: Uint64, reverse_order: Option<bool>) -> Vec<LiveCell>;
-    pub fn get_transactions_by_lock_hash(&self, lock_hash: H256, page: Uint64, per_page: Uint64, reverse_order: Option<bool>) -> Vec<CellTransaction>;
-    pub fn index_lock_hash(&self, lock_hash: H256, index_from: Option<BlockNumber>) -> LockHashIndexState;
-    pub fn deindex_lock_hash(&self, lock_hash: H256) -> ();
-    pub fn get_lock_hash_index_states(&self) -> Vec<LockHashIndexState>;
     pub fn calculate_dao_maximum_withdraw(&self, _out_point: OutPoint, _hash: H256) -> Capacity;
-    pub fn get_cellbase_output_capacity_details(&self, _hash: H256) -> Option<BlockReward>;
-    pub fn broadcast_transaction(&self, tx: Transaction, cycles: Cycle) -> H256;
-    pub fn estimate_fee_rate(&self, expect_confirm_blocks: Uint64) -> EstimateResult;
+    pub fn get_block_economic_state(&self, _hash: H256) -> Option<BlockEconomicState>;
+    pub fn get_transaction_proof(&self, tx_hashes: Vec<H256>, block_hash: Option<H256>) -> TransactionProof;
+    pub fn verify_transaction_proof(&self, tx_proof: TransactionProof) -> Vec<H256>;
+    pub fn notify_transaction(&self, tx: Transaction) -> H256;
+    pub fn tx_pool_ready(&self) -> bool;
 });

@@ -1,33 +1,38 @@
 //! The primary module containing the implementations of the transaction pool
 //! and its top-level members.
 
-use crate::component::entry::TxEntry;
-use ckb_types::{core::Capacity, packed::ProposalShortId};
+use crate::{component::entry::TxEntry, error::Reject};
+use ckb_types::{
+    core::Capacity,
+    packed::{OutPoint, ProposalShortId},
+};
+use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::hash_map::Entry as HashMapEntry;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A struct to use as a sorted key
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub struct AncestorsScoreSortKey {
     pub fee: Capacity,
-    pub vbytes: u64,
+    pub weight: u64,
     pub id: ProposalShortId,
     pub ancestors_fee: Capacity,
-    pub ancestors_vbytes: u64,
+    pub ancestors_weight: u64,
     pub ancestors_size: usize,
 }
 
 impl AncestorsScoreSortKey {
     /// compare tx fee rate with ancestors fee rate and return the min one
-    fn min_fee_and_vbytes(&self) -> (Capacity, u64) {
-        // avoid division a_fee/a_vbytes > b_fee/b_vbytes
-        let tx_weight = u128::from(self.fee.as_u64()) * u128::from(self.ancestors_vbytes);
-        let ancestors_weight = u128::from(self.ancestors_fee.as_u64()) * u128::from(self.vbytes);
+    pub(crate) fn min_fee_and_weight(&self) -> (Capacity, u64) {
+        // avoid division a_fee/a_weight > b_fee/b_weight
+        let tx_weight = u128::from(self.fee.as_u64()) * u128::from(self.ancestors_weight);
+        let ancestors_weight = u128::from(self.ancestors_fee.as_u64()) * u128::from(self.weight);
 
         if tx_weight < ancestors_weight {
-            (self.fee, self.vbytes)
+            (self.fee, self.weight)
         } else {
-            (self.ancestors_fee, self.ancestors_vbytes)
+            (self.ancestors_fee, self.ancestors_weight)
         }
     }
 }
@@ -40,17 +45,17 @@ impl PartialOrd for AncestorsScoreSortKey {
 
 impl Ord for AncestorsScoreSortKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        // avoid division a_fee/a_vbytes > b_fee/b_vbytes
-        let (fee, vbytes) = self.min_fee_and_vbytes();
-        let (other_fee, other_vbytes) = other.min_fee_and_vbytes();
-        let self_weight = u128::from(fee.as_u64()) * u128::from(other_vbytes);
-        let other_weight = u128::from(other_fee.as_u64()) * u128::from(vbytes);
+        // avoid division a_fee/a_weight > b_fee/b_weight
+        let (fee, weight) = self.min_fee_and_weight();
+        let (other_fee, other_weight) = other.min_fee_and_weight();
+        let self_weight = u128::from(fee.as_u64()) * u128::from(other_weight);
+        let other_weight = u128::from(other_fee.as_u64()) * u128::from(weight);
         if self_weight == other_weight {
-            // if fee rate weight is same, then compare with ancestor vbytes
-            if self.ancestors_vbytes == other.ancestors_vbytes {
+            // if fee rate weight is same, then compare with ancestor weight
+            if self.ancestors_weight == other.ancestors_weight {
                 self.id.raw_data().cmp(&other.id.raw_data())
             } else {
-                self.ancestors_vbytes.cmp(&other.ancestors_vbytes)
+                self.ancestors_weight.cmp(&other.ancestors_weight)
             }
         } else {
             self_weight.cmp(&other_weight)
@@ -59,7 +64,7 @@ impl Ord for AncestorsScoreSortKey {
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct TxLink {
+pub struct TxLinks {
     pub parents: HashSet<ProposalShortId>,
     pub children: HashSet<ProposalShortId>,
 }
@@ -70,135 +75,256 @@ enum Relation {
     Children,
 }
 
-impl TxLink {
-    fn get_direct_ids(&self, r: Relation) -> &HashSet<ProposalShortId> {
-        match r {
+impl TxLinks {
+    fn get_direct_ids(&self, relation: Relation) -> &HashSet<ProposalShortId> {
+        match relation {
             Relation::Parents => &self.parents,
             Relation::Children => &self.children,
         }
     }
+}
 
-    fn get_relative_ids(
-        links: &HashMap<ProposalShortId, TxLink>,
-        tx_short_id: &ProposalShortId,
-        relation: Relation,
-    ) -> HashSet<ProposalShortId> {
-        let mut family_txs = links
-            .get(tx_short_id)
-            .map(|link| link.get_direct_ids(relation).clone())
-            .unwrap_or_default();
-        let mut relative_txs = HashSet::with_capacity(family_txs.len());
-        while !family_txs.is_empty() {
-            let id = family_txs
-                .iter()
-                .next()
-                .map(ToOwned::to_owned)
-                .expect("exists");
-            relative_txs.insert(id.clone());
-            family_txs.remove(&id);
+fn calc_relation_ids(
+    stage: Cow<HashSet<ProposalShortId>>,
+    map: &TxLinksMap,
+    relation: Relation,
+) -> HashSet<ProposalShortId> {
+    let mut stage = stage.into_owned();
+    let mut relation_ids = HashSet::with_capacity(stage.len());
 
-            // check parents recursively
-            for id in links
-                .get(&id)
-                .map(|link| link.get_direct_ids(relation).clone())
-                .unwrap_or_default()
-            {
-                if !relative_txs.contains(&id) {
-                    family_txs.insert(id);
-                }
+    while let Some(id) = stage.iter().next().cloned() {
+        relation_ids.insert(id.clone());
+        stage.remove(&id);
+
+        //recursively
+        for id in map
+            .inner
+            .get(&id)
+            .map(|link| link.get_direct_ids(relation))
+            .cloned()
+            .unwrap_or_default()
+        {
+            if !relation_ids.contains(&id) {
+                stage.insert(id);
             }
         }
-        relative_txs
     }
-
-    pub fn get_ancestors(
-        links: &HashMap<ProposalShortId, TxLink>,
-        tx_short_id: &ProposalShortId,
-    ) -> HashSet<ProposalShortId> {
-        TxLink::get_relative_ids(links, tx_short_id, Relation::Parents)
-    }
-
-    pub fn get_descendants(
-        links: &HashMap<ProposalShortId, TxLink>,
-        tx_short_id: &ProposalShortId,
-    ) -> HashSet<ProposalShortId> {
-        TxLink::get_relative_ids(links, tx_short_id, Relation::Children)
-    }
+    relation_ids
 }
 
 #[derive(Default, Debug, Clone)]
+pub struct TxLinksMap {
+    pub(crate) inner: HashMap<ProposalShortId, TxLinks>,
+}
+
+impl TxLinksMap {
+    fn new() -> Self {
+        TxLinksMap {
+            inner: Default::default(),
+        }
+    }
+
+    fn calc_relative_ids(
+        &self,
+        short_id: &ProposalShortId,
+        relation: Relation,
+    ) -> HashSet<ProposalShortId> {
+        let direct = self
+            .inner
+            .get(short_id)
+            .map(|link| link.get_direct_ids(relation))
+            .cloned()
+            .unwrap_or_default();
+
+        calc_relation_ids(Cow::Owned(direct), self, relation)
+    }
+
+    pub fn calc_ancestors(&self, short_id: &ProposalShortId) -> HashSet<ProposalShortId> {
+        self.calc_relative_ids(short_id, Relation::Parents)
+    }
+
+    pub fn calc_descendants(&self, short_id: &ProposalShortId) -> HashSet<ProposalShortId> {
+        self.calc_relative_ids(short_id, Relation::Children)
+    }
+
+    pub fn get_children(&self, short_id: &ProposalShortId) -> Option<&HashSet<ProposalShortId>> {
+        self.inner.get(short_id).map(|link| &link.children)
+    }
+
+    pub fn get_parents(&self, short_id: &ProposalShortId) -> Option<&HashSet<ProposalShortId>> {
+        self.inner.get(short_id).map(|link| &link.parents)
+    }
+
+    pub fn remove(&mut self, short_id: &ProposalShortId) -> Option<TxLinks> {
+        self.inner.remove(short_id)
+    }
+
+    fn remove_child(
+        &mut self,
+        short_id: &ProposalShortId,
+        child: &ProposalShortId,
+    ) -> Option<bool> {
+        self.inner
+            .get_mut(short_id)
+            .map(|links| links.children.remove(child))
+    }
+
+    fn remove_parent(
+        &mut self,
+        short_id: &ProposalShortId,
+        parent: &ProposalShortId,
+    ) -> Option<bool> {
+        self.inner
+            .get_mut(short_id)
+            .map(|links| links.parents.remove(parent))
+    }
+
+    fn add_child(&mut self, short_id: &ProposalShortId, child: ProposalShortId) -> Option<bool> {
+        self.inner
+            .get_mut(short_id)
+            .map(|links| links.children.insert(child))
+    }
+
+    fn add_parent(&mut self, short_id: &ProposalShortId, parent: ProposalShortId) -> Option<bool> {
+        self.inner
+            .get_mut(short_id)
+            .map(|links| links.parents.insert(parent))
+    }
+
+    fn clear(&mut self) {
+        self.inner.clear();
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct SortedTxMap {
     entries: HashMap<ProposalShortId, TxEntry>,
-    sorted_index: BTreeSet<AncestorsScoreSortKey>,
+    pub(crate) sorted_index: BTreeSet<AncestorsScoreSortKey>,
+    deps: HashMap<OutPoint, HashSet<ProposalShortId>>,
     /// A map track transaction ancestors and descendants
-    links: HashMap<ProposalShortId, TxLink>,
+    pub(crate) links: TxLinksMap,
+    max_ancestors_count: usize,
 }
 
 impl SortedTxMap {
+    pub fn new(max_ancestors_count: usize) -> Self {
+        SortedTxMap {
+            entries: Default::default(),
+            sorted_index: Default::default(),
+            links: TxLinksMap::new(),
+            deps: Default::default(),
+            max_ancestors_count,
+        }
+    }
+
     pub fn size(&self) -> usize {
         self.entries.len()
     }
 
-    /// update entry ancestor prefix fields
-    fn update_ancestors_stat_for_entry(
-        &self,
-        entry: &mut TxEntry,
-        parents: &HashSet<ProposalShortId>,
-    ) {
-        for id in parents {
-            let parent_entry = self.entries.get(&id).expect("pool consistent");
-            entry.add_ancestors_weight(&parent_entry);
-        }
+    pub fn iter(&self) -> impl Iterator<Item = (&ProposalShortId, &TxEntry)> {
+        self.entries.iter()
     }
 
-    pub fn add_entry(&mut self, mut entry: TxEntry) -> Option<TxEntry> {
-        let short_id = entry.transaction.proposal_short_id();
+    // Usually when a new transaction is added to the pool, it has no in-pool
+    // children (because any such children would be an orphan).  So in add_entry(), we:
+    // - update a new entry's parents set to include all in-pool parents
+    // - update the new entry's parents to include the new tx as a child
+    // - update all ancestors of the transaction to include the new tx's size/fee
+    pub fn add_entry(&mut self, mut entry: TxEntry) -> Result<bool, Reject> {
+        let short_id = entry.proposal_short_id();
 
-        let removed_entry = if self.contains_key(&short_id) {
-            self.remove_entry(&short_id)
-        } else {
-            None
+        if self.contains_key(&short_id) {
+            return Ok(false);
         };
 
         // find in pool parents
         let mut parents: HashSet<ProposalShortId> = HashSet::with_capacity(
-            entry.transaction.inputs().len() + entry.transaction.cell_deps().len(),
+            entry.transaction().inputs().len() + entry.transaction().cell_deps().len(),
         );
-        for input in entry.transaction.inputs() {
-            let parent_hash = &input.previous_output().tx_hash();
-            let id = ProposalShortId::from_tx_hash(&(parent_hash));
-            if self.links.contains_key(&id) {
+
+        for input in entry.transaction().inputs() {
+            let input_pt = input.previous_output();
+            if let Some(deps) = self.deps.get(&input_pt) {
+                parents.extend(deps.iter().cloned());
+            }
+
+            let parent_hash = &input_pt.tx_hash();
+            let id = ProposalShortId::from_tx_hash(parent_hash);
+            if self.links.inner.contains_key(&id) {
                 parents.insert(id);
             }
         }
-        for cell_dep in entry.transaction.cell_deps() {
-            let id = ProposalShortId::from_tx_hash(&(cell_dep.out_point().tx_hash()));
-            if self.links.contains_key(&id) {
+        for cell_dep in entry.transaction().cell_deps() {
+            let dep_pt = cell_dep.out_point();
+            let id = ProposalShortId::from_tx_hash(&dep_pt.tx_hash());
+            if self.links.inner.contains_key(&id) {
                 parents.insert(id);
             }
         }
-        // update ancestor_fields
-        self.update_ancestors_stat_for_entry(&mut entry, &parents);
+
+        let ancestors = calc_relation_ids(Cow::Borrowed(&parents), &self.links, Relation::Parents);
+
         // update parents references
-        for parent_id in &parents {
-            self.links
-                .get_mut(parent_id)
-                .expect("exists")
-                .children
+        for ancestor_id in &ancestors {
+            let ancestor = self.entries.get(ancestor_id).expect("pool consistent");
+            entry.add_entry_weight(ancestor);
+        }
+
+        if entry.ancestors_count > self.max_ancestors_count {
+            return Err(Reject::ExceededMaximumAncestorsCount);
+        }
+
+        for cell_dep in entry.transaction().cell_deps() {
+            let dep_pt = cell_dep.out_point();
+            // insert dep-ref map
+            self.deps
+                .entry(dep_pt)
+                .or_insert_with(HashSet::new)
                 .insert(short_id.clone());
         }
+
+        for parent in &parents {
+            self.links.add_child(parent, short_id.clone());
+        }
+
         // insert links
-        self.links.insert(
-            short_id.clone(),
-            TxLink {
-                parents,
-                children: Default::default(),
-            },
-        );
-        self.sorted_index
-            .insert(AncestorsScoreSortKey::from(&entry));
+        let links = TxLinks {
+            parents,
+            children: Default::default(),
+        };
+        self.links.inner.insert(short_id.clone(), links);
+        self.sorted_index.insert(entry.as_sorted_key());
         self.entries.insert(short_id, entry);
-        removed_entry
+        Ok(true)
+    }
+
+    // update_descendants_from_detached is used to update
+    // the descendants for a single transaction that has been added to the
+    // pool but may have child transactions in the pool, eg during a
+    // chain reorg.
+    pub fn update_descendants_from_detached(
+        &mut self,
+        id: &ProposalShortId,
+        children: HashSet<ProposalShortId>,
+    ) {
+        if let Some(entry) = self.entries.get(id).cloned() {
+            for child in &children {
+                self.links.add_parent(child, id.clone());
+            }
+            if let Some(links) = self.links.inner.get_mut(id) {
+                links.children.extend(children);
+            }
+
+            let descendants = self.calc_descendants(id);
+            for desc_id in &descendants {
+                if let Some(desc_entry) = self.entries.get_mut(desc_id) {
+                    let deleted = self.sorted_index.remove(&desc_entry.as_sorted_key());
+                    debug_assert!(deleted, "pool inconsistent");
+                    desc_entry.add_entry_weight(&entry);
+                    self.sorted_index.insert(desc_entry.as_sorted_key());
+                }
+            }
+        }
     }
 
     pub fn contains_key(&self, id: &ProposalShortId) -> bool {
@@ -209,229 +335,123 @@ impl SortedTxMap {
         self.entries.get(id)
     }
 
-    pub fn remove_entry_and_descendants(&mut self, id: &ProposalShortId) -> Vec<TxEntry> {
-        let mut queue = VecDeque::new();
-        let mut removed = Vec::new();
-        queue.push_back(id.clone());
-        while let Some(id) = queue.pop_front() {
-            if let Some(entry) = self.entries.remove(&id) {
-                let deleted = self
-                    .sorted_index
-                    .remove(&AncestorsScoreSortKey::from(&entry));
-                debug_assert!(deleted, "pending pool inconsistent");
-                if let Some(link) = self.links.remove(&id) {
-                    queue.extend(link.children);
+    #[cfg(test)]
+    pub(crate) fn deps(&self) -> &HashMap<OutPoint, HashSet<ProposalShortId>> {
+        &self.deps
+    }
+
+    fn update_deps_for_remove(&mut self, entry: &TxEntry) {
+        for cell_dep in entry.transaction().cell_deps() {
+            let dep_pt = cell_dep.out_point();
+            if let HashMapEntry::Occupied(mut o) = self.deps.entry(dep_pt) {
+                let set = o.get_mut();
+                if set.remove(&entry.proposal_short_id()) && set.is_empty() {
+                    o.remove_entry();
                 }
+            }
+        }
+    }
+
+    fn update_children_for_remove(&mut self, id: &ProposalShortId) {
+        if let Some(children) = self.get_children(id).cloned() {
+            for child in children {
+                self.links.remove_parent(&child, id);
+            }
+        }
+    }
+
+    fn update_parents_for_remove(&mut self, id: &ProposalShortId) {
+        if let Some(parents) = self.get_parents(id).cloned() {
+            for parent in parents {
+                self.links.remove_child(&parent, id);
+            }
+        }
+    }
+
+    fn remove_unchecked(&mut self, id: &ProposalShortId) -> Option<TxEntry> {
+        self.entries.remove(id).map(|entry| {
+            self.sorted_index.remove(&entry.as_sorted_key());
+            self.update_deps_for_remove(&entry);
+            entry
+        })
+    }
+
+    pub fn remove_entry_and_descendants(&mut self, id: &ProposalShortId) -> Vec<TxEntry> {
+        let mut removed_ids = vec![id.to_owned()];
+        let mut removed = vec![];
+        let descendants = self.calc_descendants(id);
+        removed_ids.extend(descendants);
+
+        // update links state for remove
+        for id in &removed_ids {
+            self.update_parents_for_remove(id);
+            self.update_children_for_remove(id);
+        }
+
+        for id in removed_ids {
+            if let Some(entry) = self.remove_unchecked(&id) {
+                self.links.remove(&id);
                 removed.push(entry);
             }
         }
         removed
     }
 
+    // notice:
+    // we are sure that all in-pool ancestor have already been processed.
+    // otherwise `links` will differ from the set of parents we'd calculate by searching
     pub fn remove_entry(&mut self, id: &ProposalShortId) -> Option<TxEntry> {
-        self.entries.remove(&id).map(|entry| {
-            let deleted = self
-                .sorted_index
-                .remove(&AncestorsScoreSortKey::from(&entry));
-            debug_assert!(deleted, "pending pool inconsistent");
-            // update descendants entries
-            for desc_id in self.get_descendants(&id) {
-                if let Some(key) = self
-                    .entries
-                    .get(&desc_id)
-                    .map(|entry| entry.as_sorted_key())
-                {
-                    self.sorted_index.remove(&key);
-                }
-                if let Some(desc_entry) = self.entries.get_mut(&desc_id) {
-                    // remove entry
+        let descendants = self.calc_descendants(id);
+        self.remove_unchecked(id).map(|entry| {
+            // We're not recursively removing a tx and all its descendants
+            // So we need update statistics state
+            for desc_id in &descendants {
+                if let Some(desc_entry) = self.entries.get_mut(desc_id) {
+                    let deleted = self.sorted_index.remove(&desc_entry.as_sorted_key());
+                    debug_assert!(deleted, "pool inconsistent");
                     desc_entry.sub_entry_weight(&entry);
-                }
-                if let Some(key) = self
-                    .entries
-                    .get(&desc_id)
-                    .map(|entry| entry.as_sorted_key())
-                {
-                    self.sorted_index.insert(key);
+                    self.sorted_index.insert(desc_entry.as_sorted_key());
                 }
             }
-            // update links
-            if let Some(link) = self.links.remove(&id) {
-                for p_id in link.parents {
-                    self.links
-                        .get_mut(&p_id)
-                        .map(|link| link.children.remove(&id));
-                }
-                for c_id in link.children {
-                    self.links
-                        .get_mut(&c_id)
-                        .map(|link| link.parents.remove(&id));
-                }
-            }
+            self.update_parents_for_remove(id);
+            self.update_children_for_remove(id);
+            self.links.remove(id);
             entry
         })
     }
 
-    /// find all ancestors from pool
-    pub fn get_ancestors(&self, tx_short_id: &ProposalShortId) -> HashSet<ProposalShortId> {
-        TxLink::get_ancestors(&self.links, tx_short_id)
+    /// calculate all ancestors from pool
+    pub fn calc_ancestors(&self, short_id: &ProposalShortId) -> HashSet<ProposalShortId> {
+        self.links.calc_ancestors(short_id)
     }
 
-    /// find all descendants from pool
-    pub fn get_descendants(&self, tx_short_id: &ProposalShortId) -> HashSet<ProposalShortId> {
-        TxLink::get_descendants(&self.links, tx_short_id)
+    /// calculate all descendants from pool
+    pub fn calc_descendants(&self, short_id: &ProposalShortId) -> HashSet<ProposalShortId> {
+        self.links.calc_descendants(short_id)
     }
 
-    /// return keys sorted by tx fee rate
-    pub fn keys_sorted_by_fee(&self) -> impl Iterator<Item = &AncestorsScoreSortKey> {
-        self.sorted_index.iter().rev()
+    /// find children from pool
+    pub fn get_children(&self, short_id: &ProposalShortId) -> Option<&HashSet<ProposalShortId>> {
+        self.links.get_children(short_id)
     }
 
-    /// return keys sorted by tx fee rate and transaction relation
-    pub fn keys_sorted_by_fee_and_relation(&self) -> Vec<&AncestorsScoreSortKey> {
-        let mut keys: Vec<_> = self.keys_sorted_by_fee().collect();
-        keys.sort_by_key(|k| {
-            self.entries
-                .get(&k.id)
-                .expect("entries should consistent with sorted_index")
-                .ancestors_count
-        });
-        keys
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ckb_types::{bytes::Bytes, core::TransactionBuilder, prelude::*};
-    use std::mem::size_of;
-
-    #[test]
-    fn test_min_fee_and_vbytes() {
-        let result = vec![
-            (0, 0, 0, 0),
-            (1, 0, 1, 0),
-            (500, 10, 1000, 30),
-            (10, 500, 30, 1000),
-            (500, 10, 1000, 20),
-            (std::u64::MAX, 0, std::u64::MAX, 0),
-            (std::u64::MAX, 100, std::u64::MAX, 2000),
-            (std::u64::MAX, std::u64::MAX, std::u64::MAX, std::u64::MAX),
-        ]
-        .into_iter()
-        .map(|(fee, vbytes, ancestors_fee, ancestors_vbytes)| {
-            let key = AncestorsScoreSortKey {
-                fee: Capacity::shannons(fee),
-                vbytes,
-                id: ProposalShortId::new([0u8; 10]),
-                ancestors_fee: Capacity::shannons(ancestors_fee),
-                ancestors_vbytes,
-                ancestors_size: 0,
-            };
-            key.min_fee_and_vbytes()
-        })
-        .collect::<Vec<_>>();
-        assert_eq!(
-            result,
-            vec![
-                (Capacity::shannons(0), 0),
-                (Capacity::shannons(1), 0),
-                (Capacity::shannons(1000), 30),
-                (Capacity::shannons(10), 500),
-                (Capacity::shannons(1000), 20),
-                (Capacity::shannons(std::u64::MAX), 0),
-                (Capacity::shannons(std::u64::MAX), 2000),
-                (Capacity::shannons(std::u64::MAX), std::u64::MAX),
-            ]
-        );
+    /// find parents from pool
+    pub fn get_parents(&self, short_id: &ProposalShortId) -> Option<&HashSet<ProposalShortId>> {
+        self.links.get_parents(short_id)
     }
 
-    #[test]
-    fn test_ancestors_sorted_key_order() {
-        let mut keys = vec![
-            (0, 0, 0, 0),
-            (1, 0, 1, 0),
-            (500, 10, 1000, 30),
-            (10, 500, 30, 1000),
-            (500, 10, 1000, 30),
-            (10, 500, 30, 1000),
-            (500, 10, 1000, 20),
-            (std::u64::MAX, 0, std::u64::MAX, 0),
-            (std::u64::MAX, 100, std::u64::MAX, 2000),
-            (std::u64::MAX, std::u64::MAX, std::u64::MAX, std::u64::MAX),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(i, (fee, vbytes, ancestors_fee, ancestors_vbytes))| {
-            let mut id = [0u8; 10];
-            id[..size_of::<u32>()].copy_from_slice(&(i as u32).to_be_bytes());
-            AncestorsScoreSortKey {
-                fee: Capacity::shannons(fee),
-                vbytes,
-                id: ProposalShortId::new(id),
-                ancestors_fee: Capacity::shannons(ancestors_fee),
-                ancestors_vbytes,
-                ancestors_size: 0,
-            }
-        })
-        .collect::<Vec<_>>();
-        keys.sort();
-        assert_eq!(
-            keys.into_iter().map(|k| k.id).collect::<Vec<_>>(),
-            [0, 3, 5, 9, 2, 4, 6, 8, 1, 7]
-                .iter()
-                .map(|&i| {
-                    let mut id = [0u8; 10];
-                    id[..size_of::<u32>()].copy_from_slice(&(i as u32).to_be_bytes());
-                    ProposalShortId::new(id)
-                })
-                .collect::<Vec<_>>()
-        );
+    /// sorted by ancestor score from higher to lower
+    pub fn score_sorted_iter(&self) -> impl Iterator<Item = &TxEntry> {
+        self.sorted_index
+            .iter()
+            .rev()
+            .map(move |key| self.entries.get(&key.id).expect("consistent"))
     }
 
-    #[test]
-    fn test_sorted_tx_map_with_conflict_tx_hash() {
-        let mut map = SortedTxMap::default();
-        let tx1 = TxEntry::new(
-            TransactionBuilder::default().build(),
-            100,
-            Capacity::shannons(100),
-            100,
-            Default::default(),
-        );
-        let tx2 = TxEntry::new(
-            TransactionBuilder::default()
-                .witness(Bytes::new().pack())
-                .build(),
-            200,
-            Capacity::shannons(200),
-            200,
-            Default::default(),
-        );
-        assert_eq!(tx1.transaction.hash(), tx2.transaction.hash());
-        assert_ne!(
-            tx1.transaction.witness_hash(),
-            tx2.transaction.witness_hash()
-        );
-        let ret = map.add_entry(tx1.clone());
-        assert!(ret.is_none());
-        // tx2 should replace tx1
-        let ret = map.add_entry(tx2.clone()).unwrap();
-        assert_eq!(
-            ret.transaction.witness_hash(),
-            tx1.transaction.witness_hash()
-        );
-        // should return tx2
-        let ret = map
-            .remove_entry(&tx2.transaction.proposal_short_id())
-            .unwrap();
-        assert_eq!(
-            ret.transaction.witness_hash(),
-            tx2.transaction.witness_hash()
-        );
-        // check consistency
-        for key in map.keys_sorted_by_fee() {
-            map.get(&key.id).expect("should consistent");
-        }
+    pub(crate) fn clear(&mut self) {
+        self.sorted_index.clear();
+        self.deps.clear();
+        self.links.clear();
+        self.entries.clear();
     }
 }

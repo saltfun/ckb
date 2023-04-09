@@ -2,14 +2,23 @@ use ckb_types::{packed, prelude::*};
 use faster_hex::{hex_decode, hex_encode};
 use std::fmt;
 
+/// The 10-byte fixed-length binary encoded as a 0x-prefixed hex string in JSON.
+///
+/// ## Example
+///
+/// ```text
+/// 0xa0ef4eb5f4ceeb08a4c8
+/// ```
 #[derive(Clone, Default, PartialEq, Eq, Hash, Debug)]
 pub struct ProposalShortId(pub [u8; 10]);
 
 impl ProposalShortId {
+    /// Creates the proposal id from array.
     pub fn new(inner: [u8; 10]) -> ProposalShortId {
         ProposalShortId(inner)
     }
 
+    /// Converts into the inner bytes array.
     pub fn into_inner(self) -> [u8; 10] {
         self.0
     }
@@ -17,7 +26,19 @@ impl ProposalShortId {
 
 impl From<packed::ProposalShortId> for ProposalShortId {
     fn from(core: packed::ProposalShortId) -> ProposalShortId {
-        ProposalShortId::new(core.unpack())
+        ProposalShortId::new(
+            core.as_slice()
+                .try_into()
+                .expect("checked in packed::ProposalShortId"),
+        )
+    }
+}
+
+impl<'a> From<&'a packed::ProposalShortId> for ProposalShortId {
+    fn from(core: &'a packed::ProposalShortId) -> ProposalShortId {
+        let mut inner = [0u8; 10];
+        inner.copy_from_slice(core.as_slice());
+        ProposalShortId::new(inner)
     }
 }
 
@@ -45,7 +66,7 @@ impl<'b> serde::de::Visitor<'b> for ProposalShortIdVisitor {
         }
         let mut buffer = [0u8; 10]; // we checked length
         hex_decode(&v.as_bytes()[2..], &mut buffer)
-            .map_err(|e| E::custom(format_args!("{:?}", e)))?;
+            .map_err(|e| E::custom(format_args!("{e:?}")))?;
         Ok(ProposalShortId::new(buffer))
     }
 
@@ -66,7 +87,7 @@ impl serde::Serialize for ProposalShortId {
         buffer[0] = b'0';
         buffer[1] = b'x';
         hex_encode(&self.0, &mut buffer[2..])
-            .map_err(|e| serde::ser::Error::custom(&format!("{}", e)))?;
+            .map_err(|e| serde::ser::Error::custom(format!("{e}")))?;
         serializer.serialize_str(unsafe { ::std::str::from_utf8_unchecked(&buffer) })
     }
 }

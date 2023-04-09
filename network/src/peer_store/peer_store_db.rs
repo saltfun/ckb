@@ -7,15 +7,18 @@ use crate::{
         PeerStore,
     },
 };
-use ckb_logger::debug;
-use std::fs::{copy, create_dir_all, remove_file, rename, File, OpenOptions};
-use std::io::{Read, Write};
+use ckb_logger::{debug, error};
 use std::path::Path;
+use std::{
+    fs::{copy, create_dir_all, remove_file, rename, File, OpenOptions},
+    io::{Read, Write},
+};
 
 const DEFAULT_ADDR_MANAGER_DB: &str = "addr_manager.db";
 const DEFAULT_BAN_LIST_DB: &str = "ban_list.db";
 
 impl AddrManager {
+    /// Load address list from disk
     pub fn load<R: Read>(r: R) -> Result<Self, Error> {
         let addrs: Vec<AddrInfo> = serde_json::from_reader(r).map_err(PeerStoreError::Serde)?;
         let mut addr_manager = AddrManager::default();
@@ -23,14 +26,21 @@ impl AddrManager {
         Ok(addr_manager)
     }
 
-    pub fn dump<W: Write>(&self, w: W) -> Result<(), Error> {
+    /// Dump address list to disk
+    pub fn dump(&self, mut file: File) -> Result<(), Error> {
         let addrs: Vec<_> = self.addrs_iter().collect();
         debug!("dump {} addrs", addrs.len());
-        serde_json::to_writer(w, &addrs).map_err(|err| PeerStoreError::Serde(err).into())
+        // empty file and dump the json string to it
+        file.set_len(0)
+            .and_then(|_| serde_json::to_string(&addrs).map_err(Into::into))
+            .and_then(|json_string| file.write_all(json_string.as_bytes()))
+            .and_then(|_| file.sync_all())
+            .map_err(Into::into)
     }
 }
 
 impl BanList {
+    /// Load ban list from disk
     pub fn load<R: Read>(r: R) -> Result<Self, Error> {
         let banned_addrs: Vec<BannedAddr> =
             serde_json::from_reader(r).map_err(PeerStoreError::Serde)?;
@@ -41,42 +51,71 @@ impl BanList {
         Ok(ban_list)
     }
 
-    pub fn dump<W: Write>(&self, w: W) -> Result<(), Error> {
+    /// Dump ban list to disk
+    pub fn dump(&self, mut file: File) -> Result<(), Error> {
         let banned_addrs = self.get_banned_addrs();
         debug!("dump {} banned addrs", banned_addrs.len());
-        serde_json::to_writer(w, &banned_addrs).map_err(|err| PeerStoreError::Serde(err).into())
+        // empty file and dump the json string to it
+        file.set_len(0)
+            .and_then(|_| serde_json::to_string(&banned_addrs).map_err(Into::into))
+            .and_then(|json_string| file.write_all(json_string.as_bytes()))
+            .and_then(|_| file.sync_all())
+            .map_err(Into::into)
     }
 }
 
 impl PeerStore {
-    pub fn load_from_dir<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+    /// Init peer store from disk
+    pub fn load_from_dir_or_default<P: AsRef<Path>>(path: P) -> Self {
         let addr_manager_path = path.as_ref().join(DEFAULT_ADDR_MANAGER_DB);
         let ban_list_path = path.as_ref().join(DEFAULT_BAN_LIST_DB);
 
-        let addr_manager = if addr_manager_path.exists() {
-            AddrManager::load(File::open(addr_manager_path)?)?
-        } else {
-            debug!("Failed to load addr manager from {:?}", addr_manager_path);
-            AddrManager::default()
-        };
+        let addr_manager = File::open(&addr_manager_path)
+            .map_err(|err| {
+                debug!(
+                    "Failed to open AddrManager db, file: {:?}, error: {:?}",
+                    addr_manager_path, err
+                )
+            })
+            .and_then(|file| {
+                AddrManager::load(file).map_err(|err| {
+                    error!(
+                        "Failed to load AddrManager db, file: {:?}, error: {:?}",
+                        addr_manager_path, err
+                    )
+                })
+            })
+            .unwrap_or_default();
 
-        let ban_list = if ban_list_path.exists() {
-            BanList::load(File::open(ban_list_path)?)?
-        } else {
-            debug!("Failed to load ban list from {:?}", ban_list_path);
-            BanList::default()
-        };
+        let ban_list = File::open(&ban_list_path)
+            .map_err(|err| {
+                debug!(
+                    "Failed to open BanList db, file: {:?}, error: {:?}",
+                    ban_list_path, err
+                )
+            })
+            .and_then(|file| {
+                BanList::load(file).map_err(|err| {
+                    error!(
+                        "Failed to load BanList db, file: {:?}, error: {:?}",
+                        ban_list_path, err
+                    )
+                })
+            })
+            .unwrap_or_default();
 
-        Ok(PeerStore::new(addr_manager, ban_list))
+        PeerStore::new(addr_manager, ban_list)
     }
 
+    /// Dump all info to disk
     pub fn dump_to_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
         // create dir
         create_dir_all(&path)?;
-        // dump file to temp dir
-        let tmp_dir = tempfile::tempdir()?;
-        let tmp_addr_manager = tmp_dir.path().join(DEFAULT_ADDR_MANAGER_DB);
-        let tmp_ban_list = tmp_dir.path().join(DEFAULT_BAN_LIST_DB);
+        // dump file to a temporary sub-directory
+        let tmp_dir = path.as_ref().join("tmp");
+        create_dir_all(&tmp_dir)?;
+        let tmp_addr_manager = tmp_dir.join(DEFAULT_ADDR_MANAGER_DB);
+        let tmp_ban_list = tmp_dir.join(DEFAULT_BAN_LIST_DB);
         self.addr_manager().dump(
             OpenOptions::new()
                 .write(true)

@@ -1,25 +1,21 @@
 use super::helper::new_index_transaction;
 use crate::relayer::block_transactions_verifier::BlockTransactionsVerifier;
-use crate::relayer::error::{Error, Misbehavior};
-use ckb_types::packed::{CompactBlock, CompactBlockBuilder, IndexTransaction};
+use crate::{Status, StatusCode};
+use ckb_types::packed::{CompactBlock, CompactBlockBuilder};
 use ckb_types::prelude::*;
 
 // block_short_ids: vec![None, Some(1), None, Some(3), Some(4), None]
 fn build_compact_block() -> CompactBlock {
-    let prefilled: Vec<IndexTransaction> = vec![0, 2, 5]
-        .into_iter()
-        .map(new_index_transaction)
-        .collect();
+    let prefilled_iter = vec![0, 2, 5].into_iter().map(new_index_transaction);
 
     let short_ids = vec![1, 3, 4]
         .into_iter()
         .map(new_index_transaction)
-        .clone()
         .map(|tx| tx.transaction().proposal_short_id());
 
     CompactBlockBuilder::default()
         .short_ids(short_ids.pack())
-        .prefilled_transactions(prefilled.into_iter().pack())
+        .prefilled_transactions(prefilled_iter.pack())
         .build()
 }
 
@@ -34,16 +30,9 @@ fn test_invalid() {
         .map(|i| new_index_transaction(i).transaction().into_view())
         .collect();
 
-    let ret = BlockTransactionsVerifier::verify(&block, &indexes, block_txs.as_slice());
-
     assert_eq!(
-        ret.err(),
-        Some(Error::Misbehavior(
-            Misbehavior::InvalidBlockTransactionsLength {
-                expected: 3,
-                actual: 2
-            }
-        ))
+        BlockTransactionsVerifier::verify(&block, &indexes, block_txs.as_slice()),
+        StatusCode::BlockTransactionsLengthIsUnmatchedWithPendingCompactBlock.into(),
     );
 
     // Unordered txs
@@ -51,18 +40,9 @@ fn test_invalid() {
         .into_iter()
         .map(|i| new_index_transaction(i).transaction().into_view())
         .collect();
-
-    let expected = new_index_transaction(3).transaction().proposal_short_id();
-    let actual = new_index_transaction(4).transaction().proposal_short_id();
-
-    let ret = BlockTransactionsVerifier::verify(&block, &indexes, &block_txs);
-
     assert_eq!(
-        ret.err(),
-        Some(Error::Misbehavior(Misbehavior::InvalidBlockTransactions {
-            expected,
-            actual
-        }))
+        BlockTransactionsVerifier::verify(&block, &indexes, &block_txs),
+        StatusCode::BlockTransactionsShortIdsAreUnmatchedWithPendingCompactBlock.into(),
     );
 }
 
@@ -76,7 +56,8 @@ fn test_ok() {
         .map(|i| new_index_transaction(i).transaction().into_view())
         .collect();
 
-    let ret = BlockTransactionsVerifier::verify(&block, &indexes, &block_txs);
-
-    assert!(ret.is_ok());
+    assert_eq!(
+        BlockTransactionsVerifier::verify(&block, &indexes, &block_txs),
+        Status::ok()
+    );
 }

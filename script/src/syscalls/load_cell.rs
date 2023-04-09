@@ -1,3 +1,4 @@
+use crate::types::Indices;
 use crate::{
     cost_model::transferred_byte_cycles,
     syscalls::{
@@ -6,8 +7,12 @@ use crate::{
     },
 };
 use byteorder::{LittleEndian, WriteBytesExt};
+use ckb_traits::CellDataProvider;
 use ckb_types::{
-    core::{cell::CellMeta, Capacity},
+    core::{
+        cell::{CellMeta, ResolvedTransaction},
+        Capacity,
+    },
     packed::CellOutput,
     prelude::*,
 };
@@ -15,50 +20,62 @@ use ckb_vm::{
     registers::{A0, A3, A4, A5, A7},
     Error as VMError, Register, SupportMachine, Syscalls,
 };
+use std::sync::Arc;
 
-pub struct LoadCell<'a> {
-    outputs: &'a [CellMeta],
-    resolved_inputs: &'a [CellMeta],
-    resolved_cell_deps: &'a [CellMeta],
-    group_inputs: &'a [usize],
-    group_outputs: &'a [usize],
+pub struct LoadCell<DL> {
+    data_loader: DL,
+    rtx: Arc<ResolvedTransaction>,
+    outputs: Arc<Vec<CellMeta>>,
+    group_inputs: Indices,
+    group_outputs: Indices,
 }
 
-impl<'a> LoadCell<'a> {
+impl<DL: CellDataProvider> LoadCell<DL> {
     pub fn new(
-        outputs: &'a [CellMeta],
-        resolved_inputs: &'a [CellMeta],
-        resolved_cell_deps: &'a [CellMeta],
-        group_inputs: &'a [usize],
-        group_outputs: &'a [usize],
-    ) -> LoadCell<'a> {
+        data_loader: DL,
+        rtx: Arc<ResolvedTransaction>,
+        outputs: Arc<Vec<CellMeta>>,
+        group_inputs: Indices,
+        group_outputs: Indices,
+    ) -> LoadCell<DL> {
         LoadCell {
+            data_loader,
+            rtx,
             outputs,
-            resolved_inputs,
-            resolved_cell_deps,
             group_inputs,
             group_outputs,
         }
     }
 
-    fn fetch_cell(&self, source: Source, index: usize) -> Result<&'a CellMeta, u8> {
+    #[inline]
+    fn resolved_inputs(&self) -> &Vec<CellMeta> {
+        &self.rtx.resolved_inputs
+    }
+
+    #[inline]
+    fn resolved_cell_deps(&self) -> &Vec<CellMeta> {
+        &self.rtx.resolved_cell_deps
+    }
+
+    fn fetch_cell(&self, source: Source, index: usize) -> Result<&CellMeta, u8> {
         match source {
             Source::Transaction(SourceEntry::Input) => {
-                self.resolved_inputs.get(index).ok_or(INDEX_OUT_OF_BOUND)
+                self.resolved_inputs().get(index).ok_or(INDEX_OUT_OF_BOUND)
             }
             Source::Transaction(SourceEntry::Output) => {
                 self.outputs.get(index).ok_or(INDEX_OUT_OF_BOUND)
             }
-            Source::Transaction(SourceEntry::CellDep) => {
-                self.resolved_cell_deps.get(index).ok_or(INDEX_OUT_OF_BOUND)
-            }
+            Source::Transaction(SourceEntry::CellDep) => self
+                .resolved_cell_deps()
+                .get(index)
+                .ok_or(INDEX_OUT_OF_BOUND),
             Source::Transaction(SourceEntry::HeaderDep) => Err(INDEX_OUT_OF_BOUND),
             Source::Group(SourceEntry::Input) => self
                 .group_inputs
                 .get(index)
                 .ok_or(INDEX_OUT_OF_BOUND)
                 .and_then(|actual_index| {
-                    self.resolved_inputs
+                    self.resolved_inputs()
                         .get(*actual_index)
                         .ok_or(INDEX_OUT_OF_BOUND)
                 }),
@@ -98,9 +115,8 @@ impl<'a> LoadCell<'a> {
                 (SUCCESS, store_data(machine, &buffer)?)
             }
             CellField::DataHash => {
-                if let Some((_, data_hash)) = &cell.mem_cell_data {
-                    let bytes = data_hash.raw_data();
-                    (SUCCESS, store_data(machine, &bytes)?)
+                if let Some(bytes) = self.data_loader.load_cell_data_hash(cell) {
+                    (SUCCESS, store_data(machine, &bytes.as_bytes())?)
                 } else {
                     (ITEM_MISSING, 0)
                 }
@@ -109,7 +125,12 @@ impl<'a> LoadCell<'a> {
                 let mut buffer = vec![];
                 buffer.write_u64::<LittleEndian>(
                     cell.occupied_capacity()
-                        .map_err(|_| VMError::Unexpected)?
+                        .map_err(|_| {
+                            VMError::Unexpected(format!(
+                                "Unexpected occupied_capacity overflow {}",
+                                cell.out_point,
+                            ))
+                        })?
                         .as_u64(),
                 )?;
                 (SUCCESS, store_data(machine, &buffer)?)
@@ -144,7 +165,7 @@ impl<'a> LoadCell<'a> {
     }
 }
 
-impl<'a, Mac: SupportMachine> Syscalls<Mac> for LoadCell<'a> {
+impl<Mac: SupportMachine, DL: CellDataProvider + Send + Sync> Syscalls<Mac> for LoadCell<DL> {
     fn initialize(&mut self, _machine: &mut Mac) -> Result<(), VMError> {
         Ok(())
     }
@@ -171,7 +192,7 @@ impl<'a, Mac: SupportMachine> Syscalls<Mac> for LoadCell<'a> {
             self.load_full(machine, &cell.cell_output)?
         };
 
-        machine.add_cycles(transferred_byte_cycles(len as u64))?;
+        machine.add_cycles_no_checking(transferred_byte_cycles(len))?;
         machine.set_register(A0, Mac::REG::from_u8(return_code));
         Ok(true)
     }

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+case "$OSTYPE" in
+    darwin*)
+        if ! type gsed &> /dev/null; then
+            echo "GNU sed not found! You can install via Homebrew" >&2
+            echo >&2
+            echo "    brew install gnu-sed" >&2
+            exit 1
+        fi
+        SED=gsed
+        NEW_RUSTFLAGS="${RUSTFLAGS:-}"
+        ;;
+    *)
+        SED=sed
+        NEW_RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,--build-id"
+        ;;
+esac
+
+function restore_manifest_file () {
+    ${SED} -i -e '/\[profile.release\]/{n;d}' Cargo.toml
+}
+
+trap restore_manifest_file EXIT
+
+function main() {
+    ${SED} -i "/\[profile.release\]/adebug = true" Cargo.toml
+    RUSTFLAGS="${NEW_RUSTFLAGS}" make "$@"
+}
+
+main "$@"

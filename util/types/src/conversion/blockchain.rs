@@ -51,28 +51,12 @@ impl Pack<packed::Byte32> for [u8; 32] {
     }
 }
 
-impl<'r> Unpack<[u8; 32]> for packed::Byte32Reader<'r> {
-    fn unpack(&self) -> [u8; 32] {
-        let ptr = self.as_slice().as_ptr() as *const [u8; 32];
-        unsafe { *ptr }
-    }
-}
-impl_conversion_for_entity_unpack!([u8; 32], Byte32);
-
 impl Pack<packed::ProposalShortId> for [u8; 10] {
     fn pack(&self) -> packed::ProposalShortId {
         packed::ProposalShortId::from_slice(&self[..])
             .expect("impossible: fail to pack to ProposalShortId")
     }
 }
-
-impl<'r> Unpack<[u8; 10]> for packed::ProposalShortIdReader<'r> {
-    fn unpack(&self) -> [u8; 10] {
-        let ptr = self.as_slice().as_ptr() as *const [u8; 10];
-        unsafe { *ptr }
-    }
-}
-impl_conversion_for_entity_unpack!([u8; 10], ProposalShortId);
 
 impl Pack<packed::Bytes> for Bytes {
     fn pack(&self) -> packed::Bytes {
@@ -86,7 +70,7 @@ impl Pack<packed::Bytes> for Bytes {
 
 impl<'r> Unpack<Bytes> for packed::BytesReader<'r> {
     fn unpack(&self) -> Bytes {
-        Bytes::from(self.raw_data())
+        Bytes::from(self.raw_data().to_owned())
     }
 }
 
@@ -104,7 +88,7 @@ impl Pack<packed::Uint64> for core::EpochNumberWithFraction {
 
 impl<'r> Unpack<core::EpochNumberWithFraction> for packed::Uint64Reader<'r> {
     fn unpack(&self) -> core::EpochNumberWithFraction {
-        core::EpochNumberWithFraction::from_full_value(self.unpack())
+        core::EpochNumberWithFraction::from_full_value_unchecked(self.unpack())
     }
 }
 impl_conversion_for_entity_unpack!(core::EpochNumberWithFraction, Uint64);
@@ -112,7 +96,6 @@ impl_conversion_for_entity_unpack!(core::EpochNumberWithFraction, Uint64);
 impl_conversion_for_option!(H256, Byte32Opt, Byte32OptReader);
 impl_conversion_for_vector!(Capacity, Uint64Vec, Uint64VecReader);
 impl_conversion_for_vector!(Bytes, BytesVec, BytesVecReader);
-impl_conversion_for_packed_optional_pack!(TransactionPoint, TransactionPointOpt);
 impl_conversion_for_packed_optional_pack!(Byte32, Byte32Opt);
 impl_conversion_for_packed_optional_pack!(CellOutput, CellOutputOpt);
 impl_conversion_for_packed_optional_pack!(Script, ScriptOpt);

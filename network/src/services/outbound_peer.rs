@@ -1,21 +1,32 @@
-use crate::peer_store::types::AddrInfo;
-use crate::NetworkState;
-use ckb_logger::{trace, warn};
-use faketime::unix_time_as_millis;
-use futures::{Async, Future, Stream};
-use p2p::service::ServiceControl;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::timer::Interval;
+use crate::{
+    peer_store::{types::AddrInfo, PeerStore},
+    NetworkState,
+};
+use ckb_logger::trace;
+use ckb_systemtime::unix_time_as_millis;
+use futures::Future;
+use p2p::{multiaddr::MultiAddr, service::ServiceControl};
+use rand::prelude::IteratorRandom;
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
+use tokio::time::{Interval, MissedTickBehavior};
 
-const FEELER_CONNECTION_COUNT: usize = 5;
+const FEELER_CONNECTION_COUNT: usize = 10;
 
+/// Ensure that the outbound of the current node reaches the expected upper limit as much as possible
+/// Periodically detect and verify data in the peer store
+/// Keep the whitelist nodes connected as much as possible
+/// Periodically detection finds that the observed addresses are all valid
 pub struct OutboundPeerService {
     network_state: Arc<NetworkState>,
     p2p_control: ServiceControl,
-    interval: Interval,
+    interval: Option<Interval>,
     try_connect_interval: Duration,
-    last_connect: Option<Instant>,
+    try_identify_count: u8,
 }
 
 impl OutboundPeerService {
@@ -27,64 +38,108 @@ impl OutboundPeerService {
         OutboundPeerService {
             network_state,
             p2p_control,
-            interval: Interval::new(Instant::now(), Duration::from_secs(1)),
+            interval: None,
             try_connect_interval,
-            last_connect: None,
+            try_identify_count: 0,
         }
     }
 
-    fn dial_peers(&mut self, is_feeler: bool, count: usize) {
+    fn dial_feeler(&mut self) {
         let now_ms = unix_time_as_millis();
         let attempt_peers = self.network_state.with_peer_store_mut(|peer_store| {
-            // take extra 5 peers
-            // in current implementation fetch peers may return less than count
-            let extra_count = 5;
-            let mut paddrs = if is_feeler {
-                peer_store.fetch_addrs_to_feeler(count + extra_count)
-            } else {
-                peer_store.fetch_addrs_to_attempt(count + extra_count)
-            };
-            paddrs.truncate(count as usize);
-            for paddr in &mut paddrs {
+            let paddrs = peer_store.fetch_addrs_to_feeler(FEELER_CONNECTION_COUNT);
+            for paddr in paddrs.iter() {
                 // mark addr as tried
-                let key = paddr.ip_port();
-                if let Some(paddr) = peer_store.mut_addr_manager().get_mut(&key) {
+                if let Some(paddr) = peer_store.mut_addr_manager().get_mut(&paddr.addr) {
                     paddr.mark_tried(now_ms);
                 }
             }
             paddrs
         });
+
         trace!(
-            "count={}, attempt_peers: {:?} is_feeler: {}",
-            count,
+            "feeler dial count={}, attempt_peers: {:?}",
+            attempt_peers.len(),
             attempt_peers,
-            is_feeler
         );
 
-        for paddr in attempt_peers {
-            let AddrInfo { peer_id, addr, .. } = paddr;
-            if is_feeler {
-                self.network_state
-                    .dial_feeler(&self.p2p_control, &peer_id, addr);
-            } else {
-                self.network_state
-                    .dial_identify(&self.p2p_control, &peer_id, addr);
+        for addr in attempt_peers.into_iter().map(|info| info.addr) {
+            self.network_state.dial_feeler(&self.p2p_control, addr);
+        }
+    }
+
+    fn try_dial_peers(&mut self) {
+        let status = self.network_state.connection_status();
+        let count = status
+            .max_outbound
+            .saturating_sub(status.non_whitelist_outbound) as usize;
+        if count == 0 {
+            self.try_identify_count = 0;
+            return;
+        }
+        self.try_identify_count += 1;
+
+        let target = &self.network_state.required_flags;
+
+        let f = |peer_store: &mut PeerStore, number: usize, now_ms: u64| -> Vec<AddrInfo> {
+            let paddrs = peer_store.fetch_addrs_to_attempt(number, *target);
+            for paddr in paddrs.iter() {
+                // mark addr as tried
+                if let Some(paddr) = peer_store.mut_addr_manager().get_mut(&paddr.addr) {
+                    paddr.mark_tried(now_ms);
+                }
             }
+            paddrs
+        };
+
+        let peers: Box<dyn Iterator<Item = MultiAddr>> = if self.try_identify_count > 3 {
+            self.try_identify_count = 0;
+            let len = self.network_state.bootnodes.len();
+            if len < count {
+                let now_ms = unix_time_as_millis();
+                let attempt_peers = self
+                    .network_state
+                    .with_peer_store_mut(|peer_store| f(peer_store, count - len, now_ms));
+
+                Box::new(
+                    attempt_peers
+                        .into_iter()
+                        .map(|info| info.addr)
+                        .chain(self.network_state.bootnodes.iter().cloned()),
+                )
+            } else {
+                Box::new(
+                    self.network_state
+                        .bootnodes
+                        .iter()
+                        .choose_multiple(&mut rand::thread_rng(), count)
+                        .into_iter()
+                        .cloned(),
+                )
+            }
+        } else {
+            let now_ms = unix_time_as_millis();
+            let attempt_peers = self
+                .network_state
+                .with_peer_store_mut(|peer_store| f(peer_store, count, now_ms));
+
+            trace!(
+                "identify dial count={}, attempt_peers: {:?}",
+                attempt_peers.len(),
+                attempt_peers,
+            );
+
+            Box::new(attempt_peers.into_iter().map(|info| info.addr))
+        };
+
+        for addr in peers {
+            self.network_state.dial_identify(&self.p2p_control, addr);
         }
     }
 
     fn try_dial_whitelist(&self) {
-        // This will never panic because network start has already been checked
-        for (peer_id, addr) in self
-            .network_state
-            .config
-            .whitelist_peers()
-            .expect("address must be correct")
-        {
-            if self.network_state.query_session_id(&peer_id).is_none() {
-                self.network_state
-                    .dial_identify(&self.p2p_control, &peer_id, addr);
-            }
+        for addr in self.network_state.config.whitelist_peers() {
+            self.network_state.dial_identify(&self.p2p_control, addr);
         }
     }
 
@@ -95,51 +150,28 @@ impl OutboundPeerService {
 }
 
 impl Future for OutboundPeerService {
-    type Item = ();
-    type Error = ();
+    type Output = ();
 
-    fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
-        loop {
-            match self.interval.poll() {
-                Ok(Async::Ready(Some(_tick))) => {
-                    let last_connect = self
-                        .last_connect
-                        .map(|time| time.elapsed())
-                        .unwrap_or(Duration::from_secs(std::u64::MAX));
-                    if last_connect > self.try_connect_interval {
-                        let status = self.network_state.connection_status();
-                        let new_outbound = status
-                            .max_outbound
-                            .saturating_sub(status.non_whitelist_outbound)
-                            as usize;
-                        if !self.network_state.config.whitelist_only {
-                            if new_outbound > 0 {
-                                // dial peers
-                                self.dial_peers(false, new_outbound);
-                            } else {
-                                // feeler peers
-                                self.dial_peers(true, FEELER_CONNECTION_COUNT);
-                            }
-                        }
-                        // keep whitelist peer on connected
-                        self.try_dial_whitelist();
-                        // try dial observed addrs
-                        self.try_dial_observed();
-                        self.last_connect = Some(Instant::now());
-                    }
-                }
-                Ok(Async::Ready(None)) => {
-                    warn!("ckb outbound peer service stopped");
-                    return Ok(Async::Ready(()));
-                }
-                Ok(Async::NotReady) => {
-                    return Ok(Async::NotReady);
-                }
-                Err(err) => {
-                    warn!("outbound peer service stopped because: {:?}", err);
-                    return Err(());
-                }
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.interval.is_none() {
+            self.interval = {
+                let mut interval = tokio::time::interval(self.try_connect_interval);
+                // The outbound service does not need to urgently compensate for the missed wake,
+                // just skip behavior is enough
+                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                Some(interval)
             }
         }
+        while self.interval.as_mut().unwrap().poll_tick(cx).is_ready() {
+            // keep whitelist peer on connected
+            self.try_dial_whitelist();
+            // ensure feeler work at any time
+            self.dial_feeler();
+            // keep outbound peer is enough
+            self.try_dial_peers();
+            // try dial observed addrs
+            self.try_dial_observed();
+        }
+        Poll::Pending
     }
 }

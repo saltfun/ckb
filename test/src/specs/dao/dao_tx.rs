@@ -1,155 +1,61 @@
-use super::*;
-use crate::utils::assert_send_transaction_fail;
-use crate::{Net, Node, Spec, DEFAULT_TX_PROPOSAL_WINDOW};
-use ckb_types::{
-    bytes::Bytes,
-    core::Capacity,
-    packed::{self, CellInput, OutPoint},
-    prelude::*,
-};
+use crate::specs::dao::dao_user::DAOUser;
+use crate::specs::dao::dao_verifier::DAOVerifier;
+use crate::specs::dao::utils::{ensure_committed, goto_target_point};
+use crate::utils::{assert_send_transaction_fail, generate_utxo_set};
+use crate::{Node, Spec};
 
-pub struct DepositDAO;
-
-impl Spec for DepositDAO {
-    crate::name!("deposit_dao");
-
-    fn run(&self, net: &mut Net) {
-        let node0 = &net.nodes[0];
-        node0.generate_blocks((DEFAULT_TX_PROPOSAL_WINDOW.1 + 2) as usize);
-
-        // Deposit DAO
-        {
-            let transaction = deposit_dao_transaction(node0);
-            ensure_committed(node0, &transaction);
-        }
-
-        // Deposit DAO without specifying `block_hash` within input
-        {
-            // deposit dao transaction without `block_hash`
-            let transaction = {
-                let out_point_without_block_hash = {
-                    let tx_hash = node0.get_tip_block().transactions()[0].hash();
-                    OutPoint::new(tx_hash, 0)
-                };
-                deposit_dao_transaction(node0)
-                    .as_advanced_builder()
-                    .set_inputs(vec![CellInput::new(out_point_without_block_hash, 0)])
-                    .build()
-            };
-            ensure_committed(node0, &transaction);
-        }
-    }
-}
+use ckb_types::core::EpochNumberWithFraction;
+use ckb_types::{core::Capacity, prelude::*};
 
 pub struct WithdrawDAO;
 
 impl Spec for WithdrawDAO {
-    crate::name!("withdraw_dao");
-
-    fn run(&self, net: &mut Net) {
-        let node0 = &net.nodes[0];
-        node0.generate_blocks((DEFAULT_TX_PROPOSAL_WINDOW.1 + 2) as usize);
-
-        let deposited = {
-            let transaction = deposit_dao_transaction(node0);
-            ensure_committed(node0, &transaction)
-        };
-        let transaction = withdraw_dao_transaction(node0, deposited.0.clone(), deposited.1.clone());
-        ensure_committed(node0, &transaction);
+    fn modify_chain_spec(&self, spec: &mut ckb_chain_spec::ChainSpec) {
+        spec.params.genesis_epoch_length = Some(2);
+        spec.params.epoch_duration_target = Some(2);
+        spec.params.permanent_difficulty_in_dummy = Some(true);
     }
-}
 
-pub struct WithdrawAndDepositDAOWithinSameTx;
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
+        let utxos = generate_utxo_set(node, 21);
+        let mut user = DAOUser::new(node, utxos);
 
-impl Spec for WithdrawAndDepositDAOWithinSameTx {
-    crate::name!("withdraw_and_deposit_dao_within_same_tx");
+        ensure_committed(node, &user.deposit());
+        node.mine(20); // Time makes interest
+        ensure_committed(node, &user.prepare());
 
-    fn run(&self, net: &mut Net) {
-        let node0 = &net.nodes[0];
-        node0.generate_blocks((DEFAULT_TX_PROPOSAL_WINDOW.1 + 2) as usize);
-
-        let mut deposited = {
-            let transaction = deposit_dao_transaction(node0);
-            ensure_committed(node0, &transaction)
-        };
-        let dao_type_hash = node0
-            .consensus()
-            .dao_type_hash()
-            .expect("No dao system cell");
-        for _ in 0..5 {
-            let transaction = {
-                let transaction =
-                    withdraw_dao_transaction(node0, deposited.0.clone(), deposited.1.clone());
-                let outputs: Vec<_> = transaction
-                    .outputs()
-                    .into_iter()
-                    .map(|cell_output| {
-                        cell_output
-                            .as_builder()
-                            .type_(Some(deposit_dao_script(dao_type_hash.clone())).pack())
-                            .build()
-                    })
-                    .collect();
-                transaction
-                    .as_advanced_builder()
-                    .set_outputs(outputs)
-                    .build()
-            };
-            // TODO compare the reward
-            deposited = ensure_committed(node0, &transaction);
-        }
-    }
-}
-
-pub struct WithdrawDAOWithNotMaturitySince;
-
-impl Spec for WithdrawDAOWithNotMaturitySince {
-    crate::name!("withdraw_dao_with_not_maturity_since");
-
-    fn run(&self, net: &mut Net) {
-        let node0 = &net.nodes[0];
-        node0.generate_blocks((DEFAULT_TX_PROPOSAL_WINDOW.1 + 2) as usize);
-
-        let not_maturity = |node: &Node, previous_output: OutPoint| {
-            let not_maturity_since = node.get_tip_block_number();
-            CellInput::new(previous_output, not_maturity_since)
-        };
-
-        let deposited = {
-            let transaction = deposit_dao_transaction(node0);
-            ensure_committed(node0, &transaction)
-        };
-        let transaction = {
-            let transaction =
-                withdraw_dao_transaction(node0, deposited.0.clone(), deposited.1.clone());
-            let inputs: Vec<_> = transaction
-                .input_pts_iter()
-                .map(|out_point| not_maturity(node0, out_point.clone()))
-                .collect();
-            transaction.as_advanced_builder().set_inputs(inputs).build()
-        };
-        node0.generate_blocks(20);
-        assert_send_transaction_fail(node0, &transaction, "Script(ValidationFailure(-17))");
+        let withdrawal = user.withdraw();
+        let since = EpochNumberWithFraction::from_full_value(
+            withdrawal.inputs().get(0).unwrap().since().unpack(),
+        );
+        goto_target_point(node, since);
+        ensure_committed(node, &withdrawal);
+        DAOVerifier::init(node).verify();
     }
 }
 
 pub struct WithdrawDAOWithOverflowCapacity;
 
 impl Spec for WithdrawDAOWithOverflowCapacity {
-    crate::name!("withdraw_dao_with_overflow_capacity");
+    fn modify_chain_spec(&self, spec: &mut ckb_chain_spec::ChainSpec) {
+        spec.params.genesis_epoch_length = Some(2);
+        spec.params.epoch_duration_target = Some(2);
+        spec.params.permanent_difficulty_in_dummy = Some(true);
+    }
 
-    fn run(&self, net: &mut Net) {
-        let node0 = &net.nodes[0];
-        node0.generate_blocks((DEFAULT_TX_PROPOSAL_WINDOW.1 + 2) as usize);
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
+        let utxos = generate_utxo_set(node, 21);
+        let mut user = DAOUser::new(node, utxos);
 
-        let deposited = {
-            let transaction = deposit_dao_transaction(node0);
-            ensure_committed(node0, &transaction)
-        };
-        let transaction = {
-            let transaction =
-                withdraw_dao_transaction(node0, deposited.0.clone(), deposited.1.clone());
-            let outputs: Vec<_> = transaction
+        ensure_committed(node, &user.deposit());
+        node.mine(20); // Time makes interest
+        ensure_committed(node, &user.prepare());
+
+        let withdrawal = user.withdraw();
+        let invalid_withdrawal = {
+            let outputs: Vec<_> = withdrawal
                 .outputs()
                 .into_iter()
                 .map(|cell_output| {
@@ -161,81 +67,16 @@ impl Spec for WithdrawDAOWithOverflowCapacity {
                         .build()
                 })
                 .collect();
-            transaction
+            withdrawal
                 .as_advanced_builder()
                 .set_outputs(outputs)
                 .build()
         };
-        node0.generate_blocks(20);
-        // Withdraw DAO with empty witnesses. Return DAO script ERROR_INCORRECT_CAPACITY
-        assert_send_transaction_fail(node0, &transaction, "CapacityOverflow");
-    }
-}
-
-pub struct WithdrawDAOWithInvalidWitness;
-
-impl Spec for WithdrawDAOWithInvalidWitness {
-    crate::name!("withdraw_dao_with_invalid_witness");
-
-    fn run(&self, net: &mut Net) {
-        let node0 = &net.nodes[0];
-        node0.generate_blocks((DEFAULT_TX_PROPOSAL_WINDOW.1 + 2) as usize);
-
-        let deposited = {
-            let transaction = deposit_dao_transaction(node0);
-            ensure_committed(node0, &transaction)
-        };
-
-        // Withdraw DAO with empty witnesses. Return DAO script ERROR_SYSCALL
-        {
-            let transaction =
-                withdraw_dao_transaction(node0, deposited.0.clone(), deposited.1.clone())
-                    .as_advanced_builder()
-                    .set_witnesses(Vec::new())
-                    .build();
-            node0.generate_blocks(20);
-            assert_send_transaction_fail(node0, &transaction, "Dao(InvalidOutPoint)");
-        }
-
-        // TODO: DAO script does not return ERROR_WRONG_NUMBER_OF_ARGUMENTS now
-        // Withdraw DAO with not-enough witnesses. Return DAO script ERROR_WRONG_NUMBER_OF_ARGUMENTS
-        // {
-        //     let withdraw_header_index: Bytes = 0u64.to_le_bytes().to_vec().into();
-        //     let witness: packed::Bytes = withdraw_header_index.pack();
-        //     let transaction =
-        //         withdraw_dao_transaction(node0, deposited.0.clone(), deposited.1.clone())
-        //             .as_advanced_builder()
-        //             .set_witnesses(vec![witness])
-        //             .build();
-        //     node0.generate_blocks(20);
-        //     assert_send_transaction_fail(node0, &transaction, "Internal(CapacityOverflow)");
-        // }
-
-        // Withdraw DAO with witness has bad format. Return DAO script ERROR_ENCODING.
-        {
-            let witness: packed::Bytes = Bytes::new().pack();
-            let transaction =
-                withdraw_dao_transaction(node0, deposited.0.clone(), deposited.1.clone())
-                    .as_advanced_builder()
-                    .set_witnesses(vec![witness])
-                    .build();
-            node0.generate_blocks(20);
-            assert_send_transaction_fail(node0, &transaction, "Dao(InvalidDaoFormat)");
-        }
-
-        // Withdraw DAO with witness point to out-of-index dependency. DAO script `ckb_load_header` failed
-        {
-            let withdraw_header_index: WitnessArgs = WitnessArgs::new_builder()
-                .input_type(Some(Bytes::from(9u64.to_le_bytes().to_vec())).pack())
-                .build();
-            let witness: packed::Bytes = withdraw_header_index.as_bytes().pack();
-            let transaction =
-                withdraw_dao_transaction(node0, deposited.0.clone(), deposited.1.clone())
-                    .as_advanced_builder()
-                    .set_witnesses(vec![witness])
-                    .build();
-            node0.generate_blocks(20);
-            assert_send_transaction_fail(node0, &transaction, "Dao(InvalidOutPoint)");
-        }
+        let since = EpochNumberWithFraction::from_full_value(
+            withdrawal.inputs().get(0).unwrap().since().unpack(),
+        );
+        goto_target_point(node, since);
+        assert_send_transaction_fail(node, &invalid_withdrawal, "Overflow");
+        ensure_committed(node, &withdrawal);
     }
 }

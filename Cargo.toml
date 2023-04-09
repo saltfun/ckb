@@ -1,70 +1,121 @@
 [package]
 name = "ckb"
-version = "0.25.0-pre"
+version = "0.110.0-pre"
 license = "MIT"
 authors = ["Nervos Core Dev <dev@nervos.org>"]
-edition = "2018"
+edition = "2021"
 build = "build.rs"
+description = "CKB is the layer 1 of Nervos Network, a public/permissionless blockchain."
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.67.1"
 
 [build-dependencies]
-ckb-build-info = { path = "util/build-info" }
+ckb-build-info = { path = "util/build-info", version = "= 0.110.0-pre" }
 
 [dependencies]
-ckb-build-info = { path = "util/build-info" }
-ckb-bin = { path = "ckb-bin" }
+ckb-build-info = { path = "util/build-info", version = "= 0.110.0-pre" }
+ckb-bin = { path = "ckb-bin", version = "= 0.110.0-pre" }
 
 [dev-dependencies]
 
 [workspace]
+# To get a list sorted by dependencies, run devtools/ci/check-cyclic-dependencies.py
 members = [
-    # Members are ordered by dependencies. Crates at top has fewer dependencies.
+    "util",
+    "util/occupied-capacity/core",
+    "util/channel",
+    "util/systemtime",
+    "util/fixed-hash/core",
     "util/build-info",
     "util/logger",
-    "util",
+    "util/logger-config",
+    "util/metrics-config",
     "util/hash",
-    "util/fixed-hash",
-    "util/crypto",
     "util/rational",
-    "util/multisig",
+    "util/rust-unstable-port",
+    "benches",
+    "db-schema",
+    "util/spawn",
+    "util/occupied-capacity/macros",
+    "util/fixed-hash/macros",
+    "util/logger-service",
     "util/stop-handler",
+    "util/runtime",
+    "util/metrics",
+    "util/metrics-service",
+    "util/fixed-hash",
     "util/occupied-capacity",
+    "util/crypto",
+    "util/constant",
+    "error",
+    "util/multisig",
     "util/types",
-    "util/future-executor",
     "util/jsonrpc-types",
-    "util/fee-estimator",
-    "script/data-loader",
-    "db",
+    "freezer",
     "resource",
     "pow",
-    "network",
-    "util/network-alert",
     "util/dao/utils",
+    "traits",
     "spec",
     "util/proposal-table",
-    "store",
     "script",
-    "traits",
+    "util/app-config",
+    "db",
+    "network",
+    "miner",
+    "notify",
+    "util/memory-tracker",
+    "db-migration",
+    "util/network-alert",
+    "store",
+    "util/indexer",
+    "util/chain-iter",
     "util/test-chain-utils",
     "util/dao",
     "util/reward-calculator",
+    "util/snapshot",
+    "verification/traits",
     "verification",
-    "shared",
+    "verification/contextual",
     "tx-pool",
+    "shared",
+    "block-filter",
     "chain",
-    "indexer",
     "sync",
-    "miner",
-    "rpc",
     "util/instrument",
-    "util/app-config",
-    "ckb-bin",
-    "benches",
-    "error",
+    "rpc",
+    "util/launcher/migration-template",
+    "util/light-client-protocol-server",
+    "util/launcher",
+    "ckb-bin"
 ]
 
+[workspace.dependencies]
+tempfile = "3"
+
 [profile.release]
-debug = true
 overflow-checks = true
 
-[target.'cfg(unix)'.dependencies]
-jemallocator = { version = "0.3.0" }
+[profile.release.build-override]
+opt-level = 3
+
+[profile.bench.build-override]
+opt-level = 3
+
+[profile.prod]
+inherits = "release"
+lto = true
+codegen-units = 1
+
+[target.'cfg(all(not(target_env = "msvc"), not(target_os="macos")))'.dependencies]
+tikv-jemallocator = { version = "0.5.0", features = ["unprefixed_malloc_on_supported_platforms"] }
+
+[features]
+default = []
+deadlock_detection = ["ckb-bin/deadlock_detection"]
+with_sentry = ["ckb-bin/with_sentry"]
+with_dns_seeding = ["ckb-bin/with_dns_seeding"]
+profiling = ["tikv-jemallocator/profiling", "ckb-bin/profiling"]
+portable = ["ckb-bin/portable"]
+march-native = ["ckb-bin/march-native"]

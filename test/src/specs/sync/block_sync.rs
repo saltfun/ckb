@@ -1,43 +1,33 @@
+use crate::node::waiting_for_sync;
+use crate::util::mining::out_ibd_mode;
 use crate::utils::{
-    build_block, build_get_blocks, build_header, new_block_with_template, wait_until,
+    build_block, build_compact_block, build_get_blocks, build_header, now_ms, sleep, wait_until,
 };
-use crate::{Net, Node, Spec, TestProtocol};
+use crate::{Net, Node, Spec};
 use ckb_jsonrpc_types::ChainInfo;
-use ckb_network::PeerIndex;
-use ckb_sync::NetworkProtocol;
-use ckb_types::packed::Byte32;
+use ckb_logger::info;
+use ckb_network::{bytes::Bytes, extract_peer_id, SupportProtocols};
 use ckb_types::{
-    bytes::Bytes,
     core::BlockView,
-    packed::{self, SyncMessage},
+    packed::{self, Byte32, SendHeaders, SyncMessage},
     prelude::*,
 };
-use std::thread::sleep;
 use std::time::Duration;
 
 pub struct BlockSyncFromOne;
 
 impl Spec for BlockSyncFromOne {
-    crate::name!("block_sync_from_one");
-
-    crate::setup!(
-        num_nodes: 2,
-        connect_all: false,
-        protocols: vec![TestProtocol::sync()],
-    );
+    crate::setup!(num_nodes: 2);
 
     // NOTE: ENSURE node0 and nodes1 is in genesis state.
-    fn run(&self, net: &mut Net) {
-        let node0 = &net.nodes[0];
-        let node1 = &net.nodes[1];
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node0 = &nodes[0];
+        let node1 = &nodes[1];
         let (rpc_client0, rpc_client1) = (node0.rpc_client(), node1.rpc_client());
         assert_eq!(0, rpc_client0.get_tip_block_number());
         assert_eq!(0, rpc_client1.get_tip_block_number());
 
-        (0..3).for_each(|_| {
-            node0.generate_block();
-        });
-
+        node0.mine(3);
         node1.connect(node0);
 
         let ret = wait_until(10, || {
@@ -55,23 +45,17 @@ impl Spec for BlockSyncFromOne {
 pub struct BlockSyncWithUncle;
 
 impl Spec for BlockSyncWithUncle {
-    crate::name!("block_sync_with_uncle");
-
-    crate::setup!(
-        num_nodes: 2,
-        connect_all: false,
-        protocols: vec![TestProtocol::sync(), TestProtocol::relay()],
-    );
+    crate::setup!(num_nodes: 2);
 
     // Case: Sync a block with uncle
-    fn run(&self, net: &mut Net) {
-        let target = &net.nodes[0];
-        let node1 = &net.nodes[1];
-        net.exit_ibd_mode();
+    fn run(&self, nodes: &mut Vec<Node>) {
+        out_ibd_mode(nodes);
+        let target = &nodes[0];
+        let node1 = &nodes[1];
 
         let new_builder = node1.new_block_builder(None, None, None);
         let new_block1 = new_builder.clone().nonce(0.pack()).build();
-        let new_block2 = new_builder.clone().nonce(1.pack()).build();
+        let new_block2 = new_builder.nonce(1.pack()).build();
 
         node1.submit_block(&new_block1);
         node1.submit_block(&new_block2);
@@ -84,15 +68,10 @@ impl Spec for BlockSyncWithUncle {
 
         let block_builder = node1.new_block_builder(None, None, None);
 
-        node1.submit_block(
-            &block_builder
-                .clone()
-                .set_uncles(vec![uncle.clone()])
-                .build(),
-        );
+        node1.submit_block(&block_builder.set_uncles(vec![uncle.clone()]).build());
 
         target.connect(node1);
-        target.waiting_for_sync(node1, 3);
+        waiting_for_sync(nodes);
 
         // check whether node panic
         assert!(target.rpc_client().get_block(uncle.hash()).is_none());
@@ -102,19 +81,13 @@ impl Spec for BlockSyncWithUncle {
 pub struct BlockSyncForks;
 
 impl Spec for BlockSyncForks {
-    crate::name!("block_sync_forks");
-
-    crate::setup!(
-        num_nodes: 3,
-        connect_all: false,
-        protocols: vec![TestProtocol::sync()],
-    );
+    crate::setup!(num_nodes: 3);
 
     // NOTE: ENSURE node0 and nodes1 is in genesis state.
-    fn run(&self, net: &mut Net) {
-        let node0 = &net.nodes[0];
-        let node1 = &net.nodes[1];
-        let node2 = &net.nodes[2];
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node0 = &nodes[0];
+        let node1 = &nodes[1];
+        let node2 = &nodes[2];
         let (rpc_client0, rpc_client1, rpc_client2) =
             (node0.rpc_client(), node1.rpc_client(), node2.rpc_client());
         assert_eq!(0, rpc_client0.get_tip_block_number());
@@ -175,99 +148,59 @@ impl Spec for BlockSyncForks {
 pub struct BlockSyncDuplicatedAndReconnect;
 
 impl Spec for BlockSyncDuplicatedAndReconnect {
-    crate::name!("block_sync_duplicated_and_reconnect");
-
-    crate::setup!(protocols: vec![TestProtocol::sync()]);
-
     // Case: Sync a header, sync a duplicated header, reconnect and sync a duplicated header
-    fn run(&self, net: &mut Net) {
-        let node = &net.nodes[0];
-        let rpc_client = node.rpc_client();
-        net.exit_ibd_mode();
-        net.connect(node);
-        let (peer_id, _, _) = net
-            .receive_timeout(Duration::new(10, 0))
-            .expect("build connection with node");
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
+        out_ibd_mode(nodes);
+
+        let mut net = Net::new(self.name(), node.consensus(), vec![SupportProtocols::Sync]);
+        let block = node.new_block(None, None, None);
 
         // Sync a new header to `node`, `node` should send back a corresponding GetBlocks message
-        let block = node.new_block(None, None, None);
-        sync_header(&net, peer_id, &block);
-
-        net.should_receive(
-            |data: &Bytes| {
-                SyncMessage::from_slice(&data)
-                    .map(|message| message.to_enum().item_name() == packed::GetBlocks::NAME)
-                    .unwrap_or(false)
-            },
-            &format!(
-                "Node should send back GetBlocks message for the block {}",
-                block.hash()
-            ),
-        );
+        net.connect(node);
+        sync_header(&net, node, &block);
+        should_receive_get_blocks_message(&net, node, block.hash());
 
         // Sync duplicated header again, `node` should discard the duplicated one.
         // So we will not receive any response messages
-        sync_header(&net, peer_id, &block);
+        sync_header(&net, node, &block);
         assert!(
-            net.receive_timeout(Duration::new(10, 0)).is_err(),
+            net.receive_timeout(node, Duration::new(10, 0)).is_err(),
             "node should discard duplicated sync headers",
         );
 
         // Disconnect and reconnect node, and then sync the same header
         // `node` should send back a corresponding GetBlocks message
         let ctrl = net.controller();
-        let peer = ctrl.0.connected_peers()[peer_id.value() - 1].clone();
-        ctrl.0.remove_node(&peer.0);
-        wait_until(5, || {
-            rpc_client.get_peers().is_empty() && ctrl.0.connected_peers().is_empty()
+        let peers_num = ctrl.connected_peers().len();
+        let peer = ctrl.connected_peers()[peers_num - 1].clone();
+        ctrl.remove_node(&extract_peer_id(&peer.1.connected_addr).unwrap());
+        let ret = wait_until(5, || {
+            node.rpc_client().get_peers().is_empty() && ctrl.connected_peers().is_empty()
         });
+        assert!(ret, "Net disconnect node");
 
+        // Sync that header to `node` once more, `node` should send back a corresponding GetBlocks
+        // message
         net.connect(node);
-        let (peer_id, _, _) = net
-            .receive_timeout(Duration::new(10, 0))
-            .expect("build connection with node");
-        sync_header(&net, peer_id, &block);
-
-        net.should_receive(
-            |data: &Bytes| {
-                SyncMessage::from_slice(&data)
-                    .map(|message| message.to_enum().item_name() == packed::GetBlocks::NAME)
-                    .unwrap_or(false)
-            },
-            &format!(
-                "Node should send back GetBlocks message for the block {}",
-                block.hash()
-            ),
-        );
+        sync_header(&net, node, &block);
+        should_receive_get_blocks_message(&net, node, block.hash());
 
         // Sync corresponding block entity, `node` should accept the block as tip block
-        sync_block(&net, peer_id, &block);
-        let hash = block.header().hash().clone();
-        wait_until(10, || rpc_client.get_tip_header().hash == hash.unpack());
+        sync_block(&net, node, &block);
+        wait_until(10, || node.get_tip_block() == block);
     }
 }
 
 pub struct BlockSyncOrphanBlocks;
 
 impl Spec for BlockSyncOrphanBlocks {
-    crate::name!("block_sync_orphan_blocks");
+    crate::setup!(num_nodes: 2);
 
-    crate::setup!(
-        num_nodes: 2,
-        connect_all: false,
-        protocols: vec![TestProtocol::sync()],
-    );
-
-    fn run(&self, net: &mut Net) {
-        let node0 = &net.nodes[0];
-        let node1 = &net.nodes[1];
-        net.exit_ibd_mode();
-        net.connect(node0);
-        let (peer_id, _, _) = net
-            .receive_timeout(Duration::new(10, 0))
-            .expect("net receive timeout");
-        let rpc_client = node0.rpc_client();
-        let tip_number = rpc_client.get_tip_block_number();
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node0 = &nodes[0];
+        let node1 = &nodes[1];
+        out_ibd_mode(nodes);
 
         // Generate some blocks from node1
         let mut blocks: Vec<BlockView> = (1..=5)
@@ -278,25 +211,92 @@ impl Spec for BlockSyncOrphanBlocks {
             })
             .collect();
 
+        let mut net = Net::new(self.name(), node0.consensus(), vec![SupportProtocols::Sync]);
+        net.connect(node0);
+        let rpc_client = node0.rpc_client();
+        let tip_number = rpc_client.get_tip_block_number();
+
         // Send headers to node0, keep blocks body
         blocks.iter().for_each(|block| {
-            sync_header(&net, peer_id, block);
+            sync_header(&net, node0, block);
         });
 
         // Wait for block fetch timer
-        sleep(Duration::from_secs(5));
+        should_receive_get_blocks_message(&net, node0, blocks.last().unwrap().hash());
 
         // Skip the next block, send the rest blocks to node0
         let first = blocks.remove(0);
         blocks.into_iter().for_each(|block| {
-            sync_block(&net, peer_id, &block);
+            sync_block(&net, node0, &block);
         });
         let ret = wait_until(5, || rpc_client.get_tip_block_number() > tip_number);
         assert!(!ret, "node0 should stay the same");
 
         // Send that skipped first block to node0
-        sync_block(&net, peer_id, &first);
+        sync_block(&net, node0, &first);
         let ret = wait_until(10, || rpc_client.get_tip_block_number() > tip_number + 2);
+        assert!(ret, "node0 should grow up");
+    }
+}
+
+/// test case:
+/// 1. generate 1-17 block
+/// 2. sync 1-16 header to node
+/// 3. sync 2-16 block to node
+/// 4. sync 1 block to node
+/// 5. relay 17 block to node
+pub struct BlockSyncRelayerCollaboration;
+
+impl Spec for BlockSyncRelayerCollaboration {
+    crate::setup!(num_nodes: 2);
+
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node0 = &nodes[0];
+        let node1 = &nodes[1];
+        out_ibd_mode(nodes);
+
+        // Generate some blocks from node1
+        let mut blocks: Vec<BlockView> = (1..=17)
+            .map(|_| {
+                let block = node1.new_block(None, None, None);
+                node1.submit_block(&block);
+                block
+            })
+            .collect();
+
+        let mut net = Net::new(
+            self.name(),
+            node0.consensus(),
+            vec![SupportProtocols::Sync, SupportProtocols::RelayV2],
+        );
+        net.connect(node0);
+        let rpc_client = node0.rpc_client();
+        let tip_number = rpc_client.get_tip_block_number();
+
+        let last = blocks.pop().unwrap();
+
+        // Send headers to node0, keep blocks body
+        blocks.iter().for_each(|block| {
+            sync_header(&net, node0, block);
+        });
+
+        // Wait for block fetch timer
+        should_receive_get_blocks_message(&net, node0, blocks.last().unwrap().hash());
+
+        // Skip the next block, send the rest blocks to node0
+        let first = blocks.remove(0);
+        blocks.into_iter().for_each(|block| {
+            sync_block(&net, node0, &block);
+        });
+
+        let ret = wait_until(5, || rpc_client.get_tip_block_number() > tip_number);
+        assert!(!ret, "node0 should stay the same");
+
+        sync_block(&net, node0, &first);
+        net.send(node0, SupportProtocols::RelayV2, build_compact_block(&last));
+
+        let ret = wait_until(10, || rpc_client.get_tip_block_number() >= tip_number + 17);
+        info!("{}", rpc_client.get_tip_block_number());
         assert!(ret, "node0 should grow up");
     }
 }
@@ -304,18 +304,12 @@ impl Spec for BlockSyncOrphanBlocks {
 pub struct BlockSyncNonAncestorBestBlocks;
 
 impl Spec for BlockSyncNonAncestorBestBlocks {
-    crate::name!("block_sync_non_ancestor_best_blocks");
+    crate::setup!(num_nodes: 2);
 
-    crate::setup!(
-        num_nodes: 2,
-        connect_all: false,
-        protocols: vec![TestProtocol::sync()],
-    );
-
-    fn run(&self, net: &mut Net) {
-        let node0 = &net.nodes[0];
-        let node1 = &net.nodes[1];
-        net.exit_ibd_mode();
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node0 = &nodes[0];
+        let node1 = &nodes[1];
+        out_ibd_mode(nodes);
 
         // By picking blocks this way, we ensure that block a and b has
         // the same difficulty, but different hash. So
@@ -333,13 +327,11 @@ impl Spec for BlockSyncNonAncestorBestBlocks {
         assert_ne!(a.hash(), b.hash());
         node1.submit_block(&b);
 
+        let mut net = Net::new(self.name(), node0.consensus(), vec![SupportProtocols::Sync]);
         net.connect(node0);
-        let (peer_id, _, _) = net
-            .receive_timeout(Duration::new(10, 0))
-            .expect("net receive timeout");
         // With a header synced to node0, node0 should have a new best header
         // but tip is not updated yet.
-        sync_header(&net, peer_id, &a);
+        sync_header(&net, node0, &a);
 
         node1.connect(node0);
         let (rpc_client0, rpc_client1) = (node0.rpc_client(), node1.rpc_client());
@@ -358,23 +350,21 @@ impl Spec for BlockSyncNonAncestorBestBlocks {
 pub struct RequestUnverifiedBlocks;
 
 impl Spec for RequestUnverifiedBlocks {
-    crate::name!("request_unverified_blocks");
-
-    crate::setup!(num_nodes: 3, connect_all: false, protocols: vec![TestProtocol::sync()]);
+    crate::setup!(num_nodes: 3);
 
     // Case:
     //   1. `target_node` maintains an unverified fork
     //   2. Expect that when other peers request `target_node` for the blocks on the unverified
     //      fork(referred to as fork-blocks), `target_node` should discard the request because
     //     these fork-blocks are unverified yet or verified failed.
-    fn run(&self, net: &mut Net) {
-        let target_node = &net.nodes[0];
-        let node1 = &net.nodes[1];
-        let node2 = &net.nodes[2];
-        net.exit_ibd_mode();
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let target_node = &nodes[0];
+        let node1 = &nodes[1];
+        let node2 = &nodes[2];
+        out_ibd_mode(nodes);
 
-        let main_chain = build_forks(node1, &[0; 6]);
-        let fork_chain = build_forks(node2, &[1; 5]);
+        let main_chain = build_forks(node1, &[0; 16]);
+        let fork_chain = build_forks(node2, &[1; 15]);
         assert!(main_chain.len() > fork_chain.len());
 
         // Submit `main_chain` before `fork_chain`, to make `target_node` marks `fork_chain`
@@ -390,16 +380,18 @@ impl Spec for RequestUnverifiedBlocks {
 
         // Request for the blocks on `main_chain` and `fork_chain`. We should only receive the
         // `main_chain` blocks
+        let mut net = Net::new(
+            self.name(),
+            target_node.consensus(),
+            vec![SupportProtocols::Sync],
+        );
         net.connect(target_node);
-        let (peer_id, _, _) = net
-            .receive_timeout(Duration::new(10, 0))
-            .expect("net receive timeout");
-        sync_get_blocks(&net, peer_id, &main_hashes);
-        sync_get_blocks(&net, peer_id, &fork_hashes);
+        sync_get_blocks(&net, target_node, &main_hashes);
+        sync_get_blocks(&net, target_node, &fork_hashes);
 
         let mut received = Vec::new();
-        while let Ok((_, _, data)) = net.receive_timeout(Duration::from_secs(10)) {
-            let message = SyncMessage::from_slice(&data).unwrap();
+        while let Ok((_, _, data)) = net.receive_timeout(target_node, Duration::from_secs(10)) {
+            let message = SyncMessage::from_compatible_slice(&data).unwrap();
             if let packed::SyncMessageUnionReader::SendBlock(reader) = message.as_reader().to_enum()
             {
                 received.push(reader.block().calc_header_hash());
@@ -407,49 +399,149 @@ impl Spec for RequestUnverifiedBlocks {
         }
         assert!(
             main_hashes.iter().all(|hash| received.contains(hash)),
-            "Expect receiving all of the main_chain blocks: {:?}, actual: {:?}",
-            main_hashes,
-            received,
+            "Expect receiving all of the main_chain blocks: {main_hashes:?}, actual: {received:?}"
         );
         assert!(
             fork_hashes.iter().all(|hash| !received.contains(hash)),
-            "Expect not receiving any of the fork_chain blocks: {:?}, actual: {:?}",
-            fork_hashes,
-            received,
+            "Expect not receiving any of the fork_chain blocks: {fork_hashes:?}, actual: {received:?}"
+        );
+    }
+}
+
+pub struct SyncTooNewBlock;
+
+impl Spec for SyncTooNewBlock {
+    crate::setup!(num_nodes: 3);
+
+    fn run(&self, nodes: &mut Vec<Node>) {
+        info!("run sync too new block");
+        let node0 = &nodes[0];
+        let node1 = &nodes[1];
+        let node2 = &nodes[2];
+        out_ibd_mode(nodes);
+
+        let future = Duration::from_secs(6_000).as_millis() as u64;
+
+        for _ in 0..3 {
+            let too_new_block = node0
+                .new_block_builder(None, None, None)
+                .timestamp((now_ms() + future).pack())
+                .build();
+
+            // node1 sync node1 with too new block
+            let _too_new_hash = node0.process_block_without_verify(&too_new_block, false);
+        }
+
+        let (rpc_client0, rpc_client1) = (node0.rpc_client(), node1.rpc_client());
+        node1.connect(node0);
+
+        // sync node0 node2
+        node2.mine(6);
+        node2.connect(node0);
+        waiting_for_sync(&[node0, node2]);
+        node2.disconnect(node0);
+
+        sleep(15); // GET_HEADERS_TIMEOUT 15s
+        node0.mine(1);
+        let ret = wait_until(20, || {
+            let header0 = rpc_client0.get_tip_header();
+            let header1 = rpc_client1.get_tip_header();
+            header0 == header1 && header1.inner.number.value() == 8
+        });
+        assert!(ret, "Node1 should not ban Node0",);
+    }
+}
+
+pub struct HeaderSyncCycle;
+
+impl Spec for HeaderSyncCycle {
+    crate::setup!(num_nodes: 1);
+
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node0 = &nodes[0];
+        out_ibd_mode(nodes);
+
+        let mut net = Net::new(self.name(), node0.consensus(), vec![SupportProtocols::Sync]);
+        net.connect(node0);
+
+        let send_headers = SendHeaders::new_builder()
+            .headers(Vec::new().pack())
+            .build();
+
+        let msg = SyncMessage::new_builder()
+            .set(send_headers)
+            .build()
+            .as_bytes();
+
+        let ret = net.should_receive(node0, |data: &Bytes| {
+            SyncMessage::from_slice(data)
+                .map(|message| matches!(message.to_enum(), packed::SyncMessageUnion::GetHeaders(_)))
+                .unwrap_or(false)
+        });
+        assert!(ret, "Test node should receive Getheader message from node");
+
+        net.send(node0, SupportProtocols::Sync, msg);
+
+        let ret = net.should_receive(node0, |data: &Bytes| {
+            SyncMessage::from_slice(data)
+                .map(|message| matches!(message.to_enum(), packed::SyncMessageUnion::GetHeaders(_)))
+                .unwrap_or(false)
+        });
+        assert!(
+            ret,
+            "Test node should receive Getheader message from node twice"
         );
     }
 }
 
 fn build_forks(node: &Node, offsets: &[u64]) -> Vec<BlockView> {
+    use std::thread::sleep;
+
     let rpc_client = node.rpc_client();
     let mut blocks = Vec::with_capacity(offsets.len());
     for offset in offsets.iter() {
         let mut template = rpc_client.get_block_template(None, None, None);
-        template.current_time = (template.current_time.value() + offset).into();
-        let block = new_block_with_template(template);
-        node.submit_block(&block);
+        let next_number = template.number.value() + 1;
 
-        blocks.push(block);
+        template.current_time = (template.current_time.value() + offset).into();
+        rpc_client.generate_block_with_template(template.clone());
+        blocks.push(packed::Block::from(template).into_view());
+
+        while rpc_client
+            .get_block_template(None, None, None)
+            .number
+            .value()
+            != next_number
+        {
+            sleep(Duration::from_millis(100));
+        }
     }
     blocks
 }
 
-fn sync_header(net: &Net, peer_id: PeerIndex, block: &BlockView) {
-    net.send(
-        NetworkProtocol::SYNC.into(),
-        peer_id,
-        build_header(&block.header()),
-    );
+fn sync_header(net: &Net, node: &Node, block: &BlockView) {
+    net.send(node, SupportProtocols::Sync, build_header(&block.header()));
 }
 
-fn sync_block(net: &Net, peer_id: PeerIndex, block: &BlockView) {
-    net.send(NetworkProtocol::SYNC.into(), peer_id, build_block(block));
+fn sync_block(net: &Net, node: &Node, block: &BlockView) {
+    net.send(node, SupportProtocols::Sync, build_block(block));
 }
 
-fn sync_get_blocks(net: &Net, peer_id: PeerIndex, hashes: &[Byte32]) {
-    net.send(
-        NetworkProtocol::SYNC.into(),
-        peer_id,
-        build_get_blocks(hashes),
-    );
+fn sync_get_blocks(net: &Net, node: &Node, hashes: &[Byte32]) {
+    net.send(node, SupportProtocols::Sync, build_get_blocks(hashes));
+}
+
+fn should_receive_get_blocks_message(net: &Net, node: &Node, last_block_hash: Byte32) {
+    let ret = net.should_receive(node, |data: &Bytes| {
+        SyncMessage::from_slice(data)
+            .map(|message| match message.to_enum() {
+                packed::SyncMessageUnion::GetBlocks(get_blocks) => {
+                    let block_hashes = get_blocks.block_hashes();
+                    block_hashes.get(block_hashes.len() - 1).unwrap() == last_block_hash
+                }
+                _ => false,
+            })
+            .unwrap_or(false)
+    });
+    assert!(ret, "Test node should receive GetBlocks message from node");
 }

@@ -1,12 +1,14 @@
-use crate::BAD_MESSAGE_BAN_TIME;
+use crate::utils::send_message_to;
+use ckb_constant::sync::BAD_MESSAGE_BAN_TIME;
 use ckb_logger::{debug, info, warn};
-use ckb_network::{CKBProtocolContext, CKBProtocolHandler, PeerIndex};
+use ckb_network::async_trait;
+use ckb_network::{bytes::Bytes, CKBProtocolContext, CKBProtocolHandler, PeerIndex};
 use ckb_types::{packed, prelude::*};
 use ckb_util::RwLock;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-const TOLERANT_OFFSET: u64 = 7_200_000;
+pub(crate) const TOLERANT_OFFSET: u64 = 7_200_000;
 const MIN_SAMPLES: usize = 5;
 const MAX_SAMPLES: usize = 11;
 
@@ -42,7 +44,7 @@ impl NetTimeChecker {
             return None;
         }
         let mut samples = self.samples.iter().cloned().collect::<Vec<_>>();
-        samples.sort();
+        samples.sort_unstable();
         let mid = samples.len() >> 1;
         if samples.len() & 0x1 == 0 {
             // samples is even
@@ -58,7 +60,7 @@ impl NetTimeChecker {
             Some(offset) => offset,
             None => return Ok(()),
         };
-        if network_offset.abs() as u64 > self.tolerant_offset {
+        if network_offset.unsigned_abs() > self.tolerant_offset {
             return Err(network_offset);
         }
         Ok(())
@@ -85,6 +87,7 @@ impl Clone for NetTimeProtocol {
 }
 
 impl NetTimeProtocol {
+    /// Init time protocol
     pub fn new(min_samples: usize, max_samples: usize, tolerant_offset: u64) -> Self {
         let checker = RwLock::new(NetTimeChecker::new(
             min_samples,
@@ -102,10 +105,11 @@ impl Default for NetTimeProtocol {
     }
 }
 
+#[async_trait]
 impl CKBProtocolHandler for NetTimeProtocol {
-    fn init(&mut self, _nc: Arc<dyn CKBProtocolContext + Sync>) {}
+    async fn init(&mut self, _nc: Arc<dyn CKBProtocolContext + Sync>) {}
 
-    fn connected(
+    async fn connected(
         &mut self,
         nc: Arc<dyn CKBProtocolContext + Sync>,
         peer_index: PeerIndex,
@@ -113,19 +117,17 @@ impl CKBProtocolHandler for NetTimeProtocol {
     ) {
         // send local time to inbound peers
         if let Some(true) = nc.get_peer(peer_index).map(|peer| peer.is_inbound()) {
-            let now = faketime::unix_time_as_millis();
+            let now = ckb_systemtime::unix_time_as_millis();
             let time = packed::Time::new_builder().timestamp(now.pack()).build();
-            if let Err(err) = nc.send_message_to(peer_index, time.as_slice().into()) {
-                debug!("net_time_checker send message error: {:?}", err);
-            }
+            let _status = send_message_to(nc.as_ref(), peer_index, &time);
         }
     }
 
-    fn received(
+    async fn received(
         &mut self,
         nc: Arc<dyn CKBProtocolContext + Sync>,
         peer_index: PeerIndex,
-        data: bytes::Bytes,
+        data: Bytes,
     ) {
         if let Some(true) = nc.get_peer(peer_index).map(|peer| peer.is_inbound()) {
             info!(
@@ -150,7 +152,7 @@ impl CKBProtocolHandler for NetTimeProtocol {
             }
         };
 
-        let now: u64 = faketime::unix_time_as_millis();
+        let now: u64 = ckb_systemtime::unix_time_as_millis();
         let offset: i64 = (i128::from(now) - i128::from(timestamp)) as i64;
         let mut net_time_checker = self.checker.write();
         debug!("new net time offset sample {}ms", offset);
@@ -158,41 +160,5 @@ impl CKBProtocolHandler for NetTimeProtocol {
         if let Err(offset) = net_time_checker.check() {
             warn!("Please check your computer's local clock({}ms offset from network peers), If your clock is wrong, it may cause unexpected errors.", offset);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_samples_collect() {
-        let mut ntc = NetTimeChecker::new(3, 5, TOLERANT_OFFSET);
-        // zero samples
-        assert!(ntc.check().is_ok());
-        // 1 sample
-        ntc.add_sample(TOLERANT_OFFSET as i64 + 1);
-        assert!(ntc.check().is_ok());
-        // 3 samples
-        ntc.add_sample(TOLERANT_OFFSET as i64 + 2);
-        ntc.add_sample(TOLERANT_OFFSET as i64 + 3);
-        assert_eq!(ntc.check().unwrap_err(), TOLERANT_OFFSET as i64 + 2);
-        // 4 samples
-        ntc.add_sample(1);
-        assert_eq!(ntc.check().unwrap_err(), TOLERANT_OFFSET as i64 + 1);
-        // 5 samples
-        ntc.add_sample(2);
-        assert_eq!(ntc.check().unwrap_err(), TOLERANT_OFFSET as i64 + 1);
-        // 5 samples within tolerant offset
-        ntc.add_sample(3);
-        ntc.add_sample(4);
-        ntc.add_sample(5);
-        assert!(ntc.check().is_ok());
-        // 5 samples negative offset
-        ntc.add_sample(-(TOLERANT_OFFSET as i64) - 1);
-        ntc.add_sample(-(TOLERANT_OFFSET as i64) - 2);
-        assert!(ntc.check().is_ok());
-        ntc.add_sample(-(TOLERANT_OFFSET as i64) - 3);
-        assert_eq!(ntc.check().unwrap_err(), -(TOLERANT_OFFSET as i64) - 1);
     }
 }

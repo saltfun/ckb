@@ -12,3 +12,6 @@ mod check_data;
 mod serialized_size;
 mod shortcuts;
 mod std_traits;
+
+#[cfg(test)]
+mod tests;

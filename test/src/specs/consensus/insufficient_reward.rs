@@ -1,67 +1,95 @@
-use crate::{Net, Spec};
-use ckb_chain_spec::ChainSpec;
+use crate::global::VENDOR_PATH;
+use crate::specs::spec_name;
+use crate::{Node, Spec};
+
 use ckb_types::{
-    core::{capacity_bytes, BlockView, Capacity},
+    core::{capacity_bytes, Capacity},
     packed::CellOutput,
     prelude::*,
 };
-use log::info;
 use std::convert::Into;
 
 pub struct InsufficientReward;
 
 impl Spec for InsufficientReward {
-    crate::name!("insufficient_reward");
+    fn before_run(&self) -> Vec<Node> {
+        let mut node = Node::new(spec_name(self), "node1");
 
-    fn before_run(&self, net: &mut Net) {
-        let node = &net.nodes[0];
-        let data_path = net
-            .vendor_dir()
+        // modify chain spec
+        node.modify_chain_spec(|spec| {
+            spec.params.initial_primary_epoch_reward = Some(Capacity::shannons(2000_00000000));
+            spec.params.secondary_epoch_reward = Some(Capacity::shannons(100_00000000));
+            spec.params.primary_epoch_reward_halving_interval = Some(2);
+            spec.params.epoch_duration_target = Some(80);
+            spec.params.genesis_epoch_length = Some(20);
+        });
+
+        // import vendor data
+        let data_path = VENDOR_PATH
+            .lock()
             .join("consensus")
             .join("insufficient_reward.json")
             .to_string_lossy()
             .to_string();
-        info!("import {}", data_path);
         node.import(data_path);
-        info!("import finished");
+
+        node.start();
+        vec![node]
     }
 
-    fn run(&self, net: &mut Net) {
-        let node = &net.nodes[0];
-        let hash = node.generate_block();
+    // Case: block which reward is insufficient could not be submitted
+    //    1. submit block with insufficient reward in current epoch should failed;
+    //    2. submit block with empty reward should success.
+    fn run(&self, nodes: &mut Vec<Node>) {
+        let node = &nodes[0];
+        let new_block_builder = node.new_block_builder(None, None, None);
 
-        let blk: BlockView = node.rpc_client().get_block(hash).unwrap().into();
-        let cellbase = &blk.transactions()[0];
-
-        assert_eq!(blk.number(), 101);
-        assert!(cellbase.outputs().is_empty());
-
+        // build a block with insufficient reward
         let output = CellOutput::new_builder()
-            .capacity(capacity_bytes!(100).pack())
+            .capacity(capacity_bytes!(1).pack())
             .lock(Default::default())
             .build();
-
-        let new_builder = node.new_block_builder(None, None, None);
-        let template = new_builder.clone().build();
-        let cellbase = template.transactions()[0]
+        let cellbase = new_block_builder.clone().build().transactions()[0]
             .as_advanced_builder()
             .output(output)
             .build();
-        let new_block = new_builder.clone().set_transactions(vec![cellbase]).build();
-
+        let new_block = new_block_builder
+            .clone()
+            .set_transactions(vec![cellbase])
+            .build();
         let result = node
             .rpc_client()
             .submit_block("".to_owned(), new_block.data().into());
-        assert!(result
-            .expect_err("invalid block submit failed")
-            .to_string()
-            .contains("Block(Cellbase(InvalidOutputQuantity))"));
+
+        assert!(
+            result
+                .expect_err("invalid block submit failed")
+                .to_string()
+                .contains("Block(Cellbase(InvalidOutputQuantity))"),
+            "Insufficient reward block should be submitted failed, but not"
+        );
+
+        // build a block with empty reward
+        let new_block = new_block_builder.build();
+        let cellbase = &new_block.transactions()[0];
+        let result = node
+            .rpc_client()
+            .submit_block("".to_owned(), new_block.data().into());
+
+        assert!(
+            cellbase.outputs().is_empty(),
+            "Cellbase output should be empty"
+        );
+        assert!(
+            result.is_ok(),
+            "Empty reward block should be submitted successfully, but not"
+        )
     }
 
     // export data
-    // fn run(&self, net: &mut Net) {
-    //     let node = &mut net.nodes[0];
-    //     let hashes = node.generate_blocks(100);
+    // fn run(&self, nodes: &mut Vec<Node>) {
+    //     let node = &mut nodes[0];
+    //     let hashes = mine(&node, 100);
 
     //     for hash in hashes {
     //         let blk: BlockView = node.rpc_client().get_block(hash).unwrap().into();
@@ -77,14 +105,4 @@ impl Spec for InsufficientReward {
     //     node.stop();
     //     node.export("${backup}".to_string());
     // }
-
-    fn modify_chain_spec(&self) -> Box<dyn Fn(&mut ChainSpec) -> ()> {
-        Box::new(|spec_config| {
-            spec_config.params.initial_primary_epoch_reward = Capacity::shannons(2000_00000000);
-            spec_config.params.secondary_epoch_reward = Capacity::shannons(100_00000000);
-            spec_config.params.primary_epoch_reward_halving_interval = 2;
-            spec_config.params.epoch_duration_target = 80;
-            spec_config.params.genesis_epoch_length = 20;
-        })
-    }
 }

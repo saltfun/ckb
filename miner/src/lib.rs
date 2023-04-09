@@ -1,21 +1,21 @@
+//! TODO(doc): @quake
 mod client;
-mod config;
-mod error;
 mod miner;
 mod worker;
 
 pub use crate::client::Client;
-pub use crate::config::{ClientConfig, MinerConfig, WorkerConfig};
-pub use crate::error::Error;
 pub use crate::miner::Miner;
 
 use ckb_jsonrpc_types::BlockTemplate;
 use ckb_types::packed::Block;
 use std::convert::From;
 
+/// TODO(doc): @quake
 #[derive(Clone)]
 pub struct Work {
+    /// TODO(doc): @quake
     work_id: u64,
+    /// TODO(doc): @quake
     block: Block,
 }
 

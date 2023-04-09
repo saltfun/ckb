@@ -1,16 +1,15 @@
 # Quick Start
 
-Following steps will assume that the shell can find the executable `ckb`, see
-how to [get CKB](get-ckb.md).
+The following steps will assume that the shell can find the executable `ckb`.
 
-First creates a directory to run CKB
+First create a directory to run CKB
 
 ```shell
 mkdir ckb-dev
 cd ckb-dev
 ```
 
-All the following commands will run in this same directory.
+All the following commands will run in the same directory.
 
 Then init the directory with the default config files.
 
@@ -19,6 +18,9 @@ ckb init
 ```
 
 See how to [configure CKB](configure.md) if you like to tweak the options.
+
+Windows users can double click `ckb-init-mainnet.bat` to initialize a mainnet
+node directory.
 
 ## Start Node
 
@@ -29,6 +31,8 @@ ckb run
 ```
 
 Restarting in the same directory will reuse the data.
+
+Windows users can double click `ckb-run.bat` to start the node.
 
 ## Use RPC
 

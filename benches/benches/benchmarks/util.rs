@@ -3,10 +3,8 @@ use ckb_chain_spec::consensus::{ConsensusBuilder, ProposalWindow};
 use ckb_crypto::secp::Privkey;
 use ckb_dao::DaoCalculator;
 use ckb_dao_utils::genesis_dao_data;
-use ckb_shared::{
-    shared::{Shared, SharedBuilder},
-    Snapshot,
-};
+use ckb_launcher::SharedBuilder;
+use ckb_shared::{Shared, Snapshot};
 use ckb_store::ChainStore;
 use ckb_system_scripts::BUNDLED_CELL;
 use ckb_test_chain_utils::always_success_cell;
@@ -77,11 +75,11 @@ pub fn new_always_success_chain(txs_size: usize, chains_num: usize) -> Chains {
     let mut chains = Chains::default();
 
     for _ in 0..chains_num {
-        let (shared, table) = SharedBuilder::default()
+        let (shared, mut pack) = SharedBuilder::with_temp_db()
             .consensus(consensus.clone())
             .build()
             .unwrap();
-        let chain_service = ChainService::new(shared.clone(), table);
+        let chain_service = ChainService::new(shared.clone(), pack.take_proposal_table());
 
         chains.push((chain_service.start::<&str>(None), shared));
     }
@@ -177,15 +175,11 @@ pub fn gen_always_success_block(
     txs_to_resolve.extend_from_slice(&transactions);
     let dao = dao_data(shared, &p_block.header(), &txs_to_resolve);
 
-    let last_epoch = shared
-        .store()
-        .get_block_epoch_index(&p_block.hash())
-        .and_then(|index| shared.store().get_epoch_ext(&index))
-        .unwrap();
     let epoch = shared
-        .store()
-        .next_epoch_ext(shared.consensus(), &last_epoch, &p_block.header())
-        .unwrap_or(last_epoch);
+        .consensus()
+        .next_epoch_ext(&p_block.header(), &shared.store().borrow_as_data_loader())
+        .unwrap()
+        .epoch();
 
     let block = BlockBuilder::default()
         .transaction(cellbase)
@@ -212,7 +206,7 @@ lazy_static! {
         let raw_data = BUNDLED_CELL
             .get("specs/cells/secp256k1_data")
             .expect("load secp256k1_blake160_sighash_all");
-        let data: Bytes = raw_data[..].into();
+        let data: Bytes = raw_data.to_vec().into();
 
         let cell = CellOutput::new_builder()
             .capacity(Capacity::bytes(data.len()).unwrap().pack())
@@ -223,7 +217,7 @@ lazy_static! {
         let raw_data = BUNDLED_CELL
             .get("specs/cells/secp256k1_blake160_sighash_all")
             .expect("load secp256k1_blake160_sighash_all");
-        let data: Bytes = raw_data[..].into();
+        let data: Bytes = raw_data.to_vec().into();
 
         let cell = CellOutput::new_builder()
             .capacity(Capacity::bytes(data.len()).unwrap().pack())
@@ -299,11 +293,11 @@ pub fn new_secp_chain(txs_size: usize, chains_num: usize) -> Chains {
     let mut chains = Chains::default();
 
     for _ in 0..chains_num {
-        let (shared, table) = SharedBuilder::default()
+        let (shared, mut pack) = SharedBuilder::with_temp_db()
             .consensus(consensus.clone())
             .build()
             .unwrap();
-        let chain_service = ChainService::new(shared.clone(), table);
+        let chain_service = ChainService::new(shared.clone(), pack.take_proposal_table());
 
         chains.push((chain_service.start::<&str>(None), shared));
     }
@@ -391,15 +385,11 @@ pub fn gen_secp_block(
     txs_to_resolve.extend_from_slice(&transactions);
     let dao = dao_data(shared, &p_block.header(), &txs_to_resolve);
 
-    let last_epoch = shared
-        .store()
-        .get_block_epoch_index(&p_block.hash())
-        .and_then(|index| shared.store().get_epoch_ext(&index))
-        .unwrap();
     let epoch = shared
-        .store()
-        .next_epoch_ext(shared.consensus(), &last_epoch, &p_block.header())
-        .unwrap_or(last_epoch);
+        .consensus()
+        .next_epoch_ext(&p_block.header(), &shared.store().borrow_as_data_loader())
+        .unwrap()
+        .epoch();
 
     let block = BlockBuilder::default()
         .transaction(cellbase)
@@ -424,7 +414,7 @@ fn create_transaction(parent_hash: &Byte32, lock: Script, dep: OutPoint) -> Tran
         .output(
             CellOutput::new_builder()
                 .capacity(capacity_bytes!(50_000).pack())
-                .lock(lock.clone())
+                .lock(lock)
                 .build(),
         )
         .output_data(data.pack())
@@ -443,7 +433,7 @@ pub fn create_2out_transaction(
     let cell_inputs = inputs.into_iter().map(|pts| CellInput::new(pts, 0));
     let cell_output = CellOutput::new_builder()
         .capacity(capacity_bytes!(50_000).pack())
-        .lock(lock.clone())
+        .lock(lock)
         .build();
 
     let inputs_count = cell_inputs.len();
@@ -472,7 +462,7 @@ pub fn create_2out_transaction(
     for w in &non_sig_witnesses {
         let len: u64 = w.len() as u64;
         blake2b.update(&len.to_le_bytes());
-        blake2b.update(&w);
+        blake2b.update(w);
     }
     blake2b.finalize(&mut message);
     let message = H256::from(message);
@@ -508,9 +498,10 @@ pub fn dao_data(shared: &Shared, parent: &HeaderView, txs: &[TransactionView]) -
         }
     });
     let rtxs = rtxs.expect("dao_data resolve_transaction");
-    let calculator = DaoCalculator::new(shared.consensus(), snapshot);
+    let data_loader = snapshot.borrow_as_data_loader();
+    let calculator = DaoCalculator::new(snapshot.consensus(), &data_loader);
     calculator
-        .dao_field(&rtxs, &parent)
+        .dao_field(rtxs.iter(), parent)
         .expect("calculator dao_field")
 }
 
@@ -520,7 +511,8 @@ pub(crate) fn calculate_reward(shared: &Shared, parent: &HeaderView) -> Capacity
     let target_number = shared.consensus().finalize_target(number).unwrap();
     let target_hash = snapshot.get_block_hash(target_number).unwrap();
     let target = snapshot.get_block_header(&target_hash).unwrap();
-    let calculator = DaoCalculator::new(shared.consensus(), snapshot.as_ref());
+    let data_loader = snapshot.borrow_as_data_loader();
+    let calculator = DaoCalculator::new(shared.consensus(), &data_loader);
     calculator
         .primary_block_reward(&target)
         .expect("calculate_reward primary_block_reward")

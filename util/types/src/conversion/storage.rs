@@ -59,18 +59,6 @@ impl<'r> Unpack<core::TransactionView> for packed::TransactionViewReader<'r> {
 }
 impl_conversion_for_entity_unpack!(core::TransactionView, TransactionView);
 
-impl Pack<packed::BlockExt> for core::BlockExt {
-    fn pack(&self) -> packed::BlockExt {
-        packed::BlockExt::new_builder()
-            .received_at(self.received_at.pack())
-            .total_difficulty(self.total_difficulty.pack())
-            .total_uncles_count(self.total_uncles_count.pack())
-            .verified(self.verified.pack())
-            .txs_fees((&self.txs_fees[..]).pack())
-            .build()
-    }
-}
-
 impl<'r> Unpack<core::BlockExt> for packed::BlockExtReader<'r> {
     fn unpack(&self) -> core::BlockExt {
         core::BlockExt {
@@ -79,10 +67,41 @@ impl<'r> Unpack<core::BlockExt> for packed::BlockExtReader<'r> {
             total_uncles_count: self.total_uncles_count().unpack(),
             verified: self.verified().unpack(),
             txs_fees: self.txs_fees().unpack(),
+            cycles: None,
+            txs_sizes: None,
         }
     }
 }
 impl_conversion_for_entity_unpack!(core::BlockExt, BlockExt);
+
+impl Pack<packed::BlockExtV1> for core::BlockExt {
+    fn pack(&self) -> packed::BlockExtV1 {
+        packed::BlockExtV1::new_builder()
+            .received_at(self.received_at.pack())
+            .total_difficulty(self.total_difficulty.pack())
+            .total_uncles_count(self.total_uncles_count.pack())
+            .verified(self.verified.pack())
+            .txs_fees((self.txs_fees[..]).pack())
+            .cycles(self.cycles.pack())
+            .txs_sizes(self.txs_sizes.pack())
+            .build()
+    }
+}
+
+impl<'r> Unpack<core::BlockExt> for packed::BlockExtV1Reader<'r> {
+    fn unpack(&self) -> core::BlockExt {
+        core::BlockExt {
+            received_at: self.received_at().unpack(),
+            total_difficulty: self.total_difficulty().unpack(),
+            total_uncles_count: self.total_uncles_count().unpack(),
+            verified: self.verified().unpack(),
+            txs_fees: self.txs_fees().unpack(),
+            cycles: self.cycles().unpack(),
+            txs_sizes: self.txs_sizes().unpack(),
+        }
+    }
+}
+impl_conversion_for_entity_unpack!(core::BlockExt, BlockExtV1);
 
 impl Pack<packed::EpochExt> for core::EpochExt {
     fn pack(&self) -> packed::EpochExt {
@@ -91,7 +110,7 @@ impl Pack<packed::EpochExt> for core::EpochExt {
             .base_block_reward(self.base_block_reward().pack())
             .remainder_reward(self.remainder_reward().pack())
             .previous_epoch_hash_rate(self.previous_epoch_hash_rate().pack())
-            .last_block_hash_in_previous_epoch(self.last_block_hash_in_previous_epoch().clone())
+            .last_block_hash_in_previous_epoch(self.last_block_hash_in_previous_epoch())
             .start_number(self.start_number().pack())
             .length(self.length().pack())
             .compact_target(self.compact_target().pack())
@@ -140,32 +159,3 @@ impl<'r> Unpack<core::TransactionInfo> for packed::TransactionInfoReader<'r> {
     }
 }
 impl_conversion_for_entity_unpack!(core::TransactionInfo, TransactionInfo);
-
-impl Pack<packed::TransactionMeta> for core::TransactionMeta {
-    fn pack(&self) -> packed::TransactionMeta {
-        let len = self.dead_cell.len();
-        let bits = self.dead_cell.to_bytes();
-        packed::TransactionMeta::new_builder()
-            .block_number(self.block_number.pack())
-            .epoch_number(self.epoch_number.pack())
-            .block_hash(self.block_hash.clone())
-            .cellbase(self.cellbase.pack())
-            .bits(bits.pack())
-            .len(len.pack())
-            .build()
-    }
-}
-
-impl<'r> Unpack<core::TransactionMeta> for packed::TransactionMetaReader<'r> {
-    fn unpack(&self) -> core::TransactionMeta {
-        core::TransactionMetaBuilder::default()
-            .block_number(self.block_number().unpack())
-            .epoch_number(self.epoch_number().unpack())
-            .block_hash(self.block_hash().to_entity())
-            .cellbase(self.cellbase().unpack())
-            .bits(self.bits().unpack())
-            .len(self.len().unpack())
-            .build()
-    }
-}
-impl_conversion_for_entity_unpack!(core::TransactionMeta, TransactionMeta);

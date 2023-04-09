@@ -1,9 +1,10 @@
+//! CKB executable main entry.
 use ckb_bin::run_app;
 use ckb_build_info::Version;
 
-#[cfg(unix)]
+#[cfg(all(not(target_env = "msvc"), not(target_os = "macos")))]
 #[global_allocator]
-static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
     let version = get_version();
@@ -24,7 +25,7 @@ fn get_version() -> Version {
         .expect("CARGO_PKG_VERSION_PATCH parse success");
     let dash_pre = {
         let pre = env!("CARGO_PKG_VERSION_PRE");
-        if pre == "" {
+        if pre.is_empty() {
             pre.to_string()
         } else {
             "-".to_string() + pre
@@ -35,7 +36,7 @@ fn get_version() -> Version {
     #[cfg(docker)]
     let commit_describe = commit_describe.map(|s| s.replace("-dirty", ""));
     let commit_date = option_env!("COMMIT_DATE").map(ToString::to_string);
-    let code_name = Some("rylai-v13".to_string());
+    let code_name = None;
     Version {
         major,
         minor,

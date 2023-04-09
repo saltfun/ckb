@@ -1,16 +1,15 @@
+#![doc(hidden)]
+
 use ckb_build_info::Version;
 use sentry::{
-    configure_scope, init,
-    integrations::panic::register_panic_handler,
-    internals::{ClientInitGuard, Dsn},
-    protocol::Event,
-    ClientOptions, Level,
+    configure_scope, init, protocol::Event, types::Dsn, ClientInitGuard, ClientOptions, Level,
 };
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::sync::Arc;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SentryConfig {
     pub dsn: String,
     pub org_ident: Option<String>,
@@ -19,7 +18,7 @@ pub struct SentryConfig {
 
 impl SentryConfig {
     pub fn init(&self, version: &Version) -> ClientInitGuard {
-        let guard = init(self.build_sentry_client_options(&version));
+        let guard = init(self.build_sentry_client_options(version));
         if guard.is_enabled() {
             configure_scope(|scope| {
                 scope.set_tag("release.pre", version.is_pre());
@@ -31,8 +30,6 @@ impl SentryConfig {
                     scope.set_extra("org_contact", org_contact.clone().into());
                 }
             });
-
-            register_panic_handler();
         }
 
         guard
@@ -68,8 +65,7 @@ fn before_send(mut event: Event<'static>) -> Option<Event<'static>> {
     let ex = match event
         .exception
         .values
-        .iter()
-        .next()
+        .get(0)
         .and_then(|ex| ex.value.as_ref())
     {
         Some(ex) => ex,

@@ -4,6 +4,7 @@ use crate::tests::util::{
 };
 use ckb_chain_spec::consensus::{Consensus, ConsensusBuilder};
 use ckb_dao_utils::genesis_dao_data;
+use ckb_reward_calculator::RewardCalculator;
 use ckb_shared::shared::Shared;
 use ckb_store::ChainStore;
 use ckb_test_chain_utils::always_success_cell;
@@ -81,18 +82,14 @@ pub(crate) fn gen_block(
 
     let dao = dao_data(consensus, parent_header, &txs, store, false);
 
-    let last_epoch = store
-        .0
-        .get_block_epoch_index(&parent_header.hash())
-        .and_then(|index| store.0.get_epoch_ext(&index))
-        .unwrap();
-    let epoch = store
-        .0
-        .next_epoch_ext(shared.consensus(), &last_epoch, &parent_header)
-        .unwrap_or(last_epoch);
+    let epoch = shared
+        .consensus()
+        .next_epoch_ext(parent_header, &shared.store().borrow_as_data_loader())
+        .unwrap()
+        .epoch();
 
     let block = BlockBuilder::default()
-        .parent_hash(parent_header.hash().to_owned())
+        .parent_hash(parent_header.hash())
         .timestamp((parent_header.timestamp() + 20_000).pack())
         .number(number.pack())
         .compact_target(epoch.compact_target().pack())
@@ -236,9 +233,8 @@ fn finalize_reward() {
         blocks.push(block);
     }
 
-    let (target, reward) = shared
-        .snapshot()
-        .finalize_block_reward(&blocks[21].header())
+    let (target, reward) = RewardCalculator::new(shared.consensus(), shared.snapshot().as_ref())
+        .block_reward_to_finalize(&blocks[21].header())
         .unwrap();
     assert_eq!(target, bob);
 
@@ -266,15 +262,14 @@ fn finalize_reward() {
         &mock_store,
     );
 
-    parent = block.header().clone();
+    parent = block.header();
 
     chain_controller
         .process_block(Arc::new(block.clone()))
         .expect("process block ok");
 
-    let (target, reward) = shared
-        .snapshot()
-        .finalize_block_reward(&block.header())
+    let (target, reward) = RewardCalculator::new(shared.consensus(), shared.snapshot().as_ref())
+        .block_reward_to_finalize(&block.header())
         .unwrap();
     assert_eq!(target, alice);
 
@@ -304,6 +299,6 @@ fn finalize_reward() {
     );
 
     chain_controller
-        .process_block(Arc::new(block.clone()))
+        .process_block(Arc::new(block))
         .expect("process block ok");
 }

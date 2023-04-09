@@ -1,11 +1,12 @@
 mod dummy;
 mod eaglesong_simple;
 
-use crate::config::WorkerConfig;
+use crate::Work;
+use ckb_app_config::MinerWorkerConfig;
+use ckb_channel::{unbounded, Sender};
 use ckb_logger::error;
-use ckb_pow::{DummyPowEngine, EaglesongPowEngine, PowEngine};
+use ckb_pow::{DummyPowEngine, EaglesongBlake2bPowEngine, EaglesongPowEngine, PowEngine};
 use ckb_types::{packed::Byte32, U256};
-use crossbeam_channel::{unbounded, Sender};
 use dummy::Dummy;
 use eaglesong_simple::EaglesongSimple;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -14,14 +15,15 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::thread;
 
-pub use dummy::DummyConfig;
-pub use eaglesong_simple::EaglesongSimpleConfig;
-
 #[derive(Clone)]
 pub enum WorkerMessage {
     Stop,
     Start,
-    NewWork { pow_hash: Byte32, target: U256 },
+    NewWork {
+        pow_hash: Byte32,
+        work: Work,
+        target: U256,
+    },
 }
 
 pub struct WorkerController {
@@ -63,26 +65,26 @@ const PROGRESS_BAR_TEMPLATE: &str = "{prefix:.bold.dim} {spinner:.green} [{elaps
 
 pub fn start_worker(
     pow: Arc<dyn PowEngine>,
-    config: &WorkerConfig,
-    nonce_tx: Sender<(Byte32, u128)>,
+    config: &MinerWorkerConfig,
+    nonce_tx: Sender<(Byte32, Work, u128)>,
     mp: &MultiProgress,
 ) -> WorkerController {
     match config {
-        WorkerConfig::Dummy(config) => {
+        MinerWorkerConfig::Dummy(config) => {
             if pow.as_any().downcast_ref::<DummyPowEngine>().is_some() {
                 let worker_name = "Dummy-Worker";
                 let pb = mp.add(ProgressBar::new(100));
                 pb.set_style(ProgressStyle::default_bar().template(PROGRESS_BAR_TEMPLATE));
-                pb.set_prefix(&worker_name);
+                pb.set_prefix(worker_name);
 
                 let (worker_tx, worker_rx) = unbounded();
-                let mut worker = Dummy::new(config, nonce_tx, worker_rx);
+                let mut worker = Dummy::try_new(config, nonce_tx, worker_rx)
+                    .expect("valid distribution parameters");
 
                 thread::Builder::new()
                     .name(worker_name.to_string())
                     .spawn(move || {
-                        let rng = || random();
-                        worker.run(rng, pb);
+                        worker.run(random, pb);
                     })
                     .expect("Start `Dummy` worker thread failed");
                 WorkerController::new(vec![worker_tx])
@@ -90,24 +92,31 @@ pub fn start_worker(
                 panic!("incompatible pow engine and worker type");
             }
         }
-        WorkerConfig::EaglesongSimple(config) => {
-            if pow.as_any().downcast_ref::<EaglesongPowEngine>().is_some() {
+        MinerWorkerConfig::EaglesongSimple(config) => {
+            let extra_hash_function = config.extra_hash_function;
+            if pow.as_any().downcast_ref::<EaglesongPowEngine>().is_some()
+                || pow
+                    .as_any()
+                    .downcast_ref::<EaglesongBlake2bPowEngine>()
+                    .is_some()
+            {
                 let worker_txs = (0..config.threads)
                     .map(|i| {
-                        let worker_name = format!("EaglesongSimple-Worker-{}", i);
+                        let worker_name = format!("EaglesongSimple-Worker-{i}");
                         let nonce_range = partition_nonce(i as u128, config.threads as u128);
                         // `100` is the len of progress bar, we can use any dummy value here,
                         // since we only show the spinner in console.
                         let pb = mp.add(ProgressBar::new(100));
                         pb.set_style(ProgressStyle::default_bar().template(PROGRESS_BAR_TEMPLATE));
-                        pb.set_prefix(&worker_name);
+                        pb.set_prefix(worker_name.clone());
 
                         let (worker_tx, worker_rx) = unbounded();
                         let nonce_tx = nonce_tx.clone();
                         thread::Builder::new()
                             .name(worker_name)
                             .spawn(move || {
-                                let mut worker = EaglesongSimple::new(nonce_tx, worker_rx);
+                                let mut worker =
+                                    EaglesongSimple::new(nonce_tx, worker_rx, extra_hash_function);
                                 let rng = nonce_generator(nonce_range);
                                 worker.run(rng, pb);
                             })

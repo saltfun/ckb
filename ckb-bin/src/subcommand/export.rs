@@ -1,17 +1,19 @@
 use ckb_app_config::{ExitCode, ExportArgs};
+use ckb_async_runtime::Handle;
 use ckb_instrument::Export;
-use ckb_shared::shared::SharedBuilder;
+use ckb_launcher::SharedBuilder;
 
-pub fn export(args: ExportArgs) -> Result<(), ExitCode> {
-    let (shared, _) = SharedBuilder::with_db_config(&args.config.db)
-        .consensus(args.consensus)
-        .build()
-        .map_err(|err| {
-            eprintln!("Export error: {:?}", err);
-            ExitCode::Failure
-        })?;
+pub fn export(args: ExportArgs, async_handle: Handle) -> Result<(), ExitCode> {
+    let builder = SharedBuilder::new(
+        &args.config.bin_name,
+        args.config.root_dir.as_path(),
+        &args.config.db,
+        None,
+        async_handle,
+    )?;
+    let (shared, _) = builder.consensus(args.consensus).build()?;
     Export::new(shared, args.target).execute().map_err(|err| {
-        eprintln!("Export error: {:?}", err);
+        eprintln!("Export error: {err:?}");
         ExitCode::Failure
     })
 }

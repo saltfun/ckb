@@ -1,49 +1,45 @@
 use super::{Worker, WorkerMessage};
+use crate::Work;
+use ckb_app_config::DummyConfig;
+use ckb_channel::{Receiver, Sender};
 use ckb_logger::error;
 use ckb_types::packed::Byte32;
-use crossbeam_channel::{Receiver, Sender};
 use indicatif::ProgressBar;
-use rand::{
-    distributions::{self as dist, Distribution as _},
-    thread_rng,
-};
-use serde_derive::{Deserialize, Serialize};
+use rand::thread_rng;
+use rand_distr::{self as dist, Distribution as _};
 use std::thread;
 use std::time::Duration;
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "delay_type")]
-pub enum DummyConfig {
-    Constant { value: u64 },
-    Uniform { low: u64, high: u64 },
-    Normal { mean: f64, std_dev: f64 },
-    Poisson { lambda: f64 },
-}
 
 pub struct Dummy {
     delay: Delay,
     start: bool,
-    pow_hash: Option<Byte32>,
-    nonce_tx: Sender<(Byte32, u128)>,
+    pow_work: Option<(Byte32, Work)>,
+    nonce_tx: Sender<(Byte32, Work, u128)>,
     worker_rx: Receiver<WorkerMessage>,
 }
 
 pub enum Delay {
     Constant(u64),
     Uniform(dist::Uniform<u64>),
-    Normal(dist::Normal),
-    Poisson(dist::Poisson),
+    Normal(dist::Normal<f64>),
+    Poisson(dist::Poisson<f64>),
 }
 
-impl From<&DummyConfig> for Delay {
-    fn from(config: &DummyConfig) -> Self {
+impl TryFrom<&DummyConfig> for Delay {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(config: &DummyConfig) -> Result<Self, Self::Error> {
         match config {
-            DummyConfig::Constant { value } => Delay::Constant(*value),
-            DummyConfig::Uniform { low, high } => Delay::Uniform(dist::Uniform::new(*low, *high)),
-            DummyConfig::Normal { mean, std_dev } => {
-                Delay::Normal(dist::Normal::new(*mean, *std_dev))
+            DummyConfig::Constant { value } => Ok(Delay::Constant(*value)),
+            DummyConfig::Uniform { low, high } => {
+                Ok(Delay::Uniform(dist::Uniform::new(*low, *high)))
             }
-            DummyConfig::Poisson { lambda } => Delay::Poisson(dist::Poisson::new(*lambda)),
+            DummyConfig::Normal { mean, std_dev } => dist::Normal::new(*mean, *std_dev)
+                .map(Delay::Normal)
+                .map_err(Into::into),
+            DummyConfig::Poisson { lambda } => dist::Poisson::new(*lambda)
+                .map(Delay::Poisson)
+                .map_err(Into::into),
         }
     }
 }
@@ -61,31 +57,33 @@ impl Delay {
             Delay::Constant(v) => *v,
             Delay::Uniform(ref d) => d.sample(&mut rng),
             Delay::Normal(ref d) => d.sample(&mut rng) as u64,
-            Delay::Poisson(ref d) => d.sample(&mut rng),
+            Delay::Poisson(ref d) => d.sample(&mut rng) as u64,
         };
         Duration::from_millis(millis)
     }
 }
 
 impl Dummy {
-    pub fn new(
+    pub fn try_new(
         config: &DummyConfig,
-        nonce_tx: Sender<(Byte32, u128)>,
+        nonce_tx: Sender<(Byte32, Work, u128)>,
         worker_rx: Receiver<WorkerMessage>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Delay::try_from(config).map(|delay| Self {
             start: true,
-            pow_hash: None,
-            delay: config.into(),
+            pow_work: None,
+            delay,
             nonce_tx,
             worker_rx,
-        }
+        })
     }
 
     fn poll_worker_message(&mut self) {
-        if let Ok(msg) = self.worker_rx.recv() {
+        while let Ok(msg) = self.worker_rx.try_recv() {
             match msg {
-                WorkerMessage::NewWork { pow_hash, .. } => self.pow_hash = Some(pow_hash),
+                WorkerMessage::NewWork { pow_hash, work, .. } => {
+                    self.pow_work = Some((pow_hash, work))
+                }
                 WorkerMessage::Stop => {
                     self.start = false;
                 }
@@ -96,9 +94,9 @@ impl Dummy {
         }
     }
 
-    fn solve(&self, pow_hash: &Byte32, nonce: u128) {
+    fn solve(&self, pow_hash: Byte32, work: Work, nonce: u128) {
         thread::sleep(self.delay.duration());
-        if let Err(err) = self.nonce_tx.send((pow_hash.clone(), nonce)) {
+        if let Err(err) = self.nonce_tx.send((pow_hash, work, nonce)) {
             error!("nonce_tx send error {:?}", err);
         }
     }
@@ -106,16 +104,13 @@ impl Dummy {
 
 impl Worker for Dummy {
     fn run<G: FnMut() -> u128>(&mut self, mut rng: G, _progress_bar: ProgressBar) {
-        let mut current = self.pow_hash.clone();
         loop {
             self.poll_worker_message();
-            if current != self.pow_hash && self.start {
-                if let Some(pow_hash) = &self.pow_hash {
-                    self.solve(pow_hash, rng());
+            if self.start {
+                if let Some((pow_hash, work)) = self.pow_work.clone() {
+                    self.solve(pow_hash, work, rng());
                 }
             }
-
-            current = self.pow_hash.clone();
         }
     }
 }

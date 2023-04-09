@@ -2,7 +2,7 @@ use crate::Score;
 
 /// Peers behaviours
 /// we maintain a score to each peer
-/// report peer bahaviour will affects peer's score
+/// report peer behaviour will affects peer's score
 ///
 /// Currently this feature is disabled, maybe someday we will add it back or totally remove it.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -14,14 +14,14 @@ pub enum Behaviour {
 }
 
 impl Behaviour {
+    /// Behaviour score
     pub fn score(self) -> Score {
-        #[allow(unreachable_patterns)]
+        #[cfg(test)]
         match self {
-            #[cfg(test)]
             Behaviour::TestGood => 10,
-            #[cfg(test)]
             Behaviour::TestBad => -10,
-            _ => 0,
         }
+        #[cfg(not(test))]
+        0
     }
 }

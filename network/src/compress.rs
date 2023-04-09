@@ -1,12 +1,15 @@
-use bytes::{Bytes, BytesMut};
+//！ckb network compress module
+
 use ckb_logger::debug;
-use snap::{Decoder as SnapDecoder, Encoder as SnapEncoder};
+use p2p::bytes::{BufMut, Bytes, BytesMut};
+use snap::raw::{decompress_len, Decoder as SnapDecoder, Encoder as SnapEncoder};
 
 use std::io;
 
-const COMPRESSION_SIZE_THRESHOLD: usize = 1024;
+pub(crate) const COMPRESSION_SIZE_THRESHOLD: usize = 1024;
 const UNCOMPRESS_FLAG: u8 = 0b0000_0000;
 const COMPRESS_FLAG: u8 = 0b1000_0000;
+const MAX_UNCOMPRESSED_LEN: usize = 1 << 23; // 8MB
 
 /// Compressed decompression structure
 ///
@@ -24,30 +27,31 @@ const COMPRESS_FLAG: u8 = 0b1000_0000;
 /// |  1~   |      | Payload (Serialized Data with Compress)        |
 /// +-------+------+------------------------------------------------+
 #[derive(Clone, Debug)]
-struct Message {
+pub(crate) struct Message {
     inner: BytesMut,
 }
 
 impl Message {
     /// create from uncompressed raw data
-    fn from_raw(data: Bytes) -> Self {
-        let mut inner = BytesMut::from(&[UNCOMPRESS_FLAG][..]);
-        inner.unsplit(BytesMut::from(data));
+    pub(crate) fn from_raw(data: Bytes) -> Self {
+        let mut inner = BytesMut::with_capacity(data.len() + 1);
+        inner.put_u8(UNCOMPRESS_FLAG);
+        inner.put(data);
         Self { inner }
     }
 
     /// create from compressed data
-    fn from_compressed(data: BytesMut) -> Self {
+    pub(crate) fn from_compressed(data: BytesMut) -> Self {
         Self { inner: data }
     }
 
     /// Compress message
-    fn compress(mut self) -> Bytes {
+    pub(crate) fn compress(mut self) -> Bytes {
         if self.inner.len() > COMPRESSION_SIZE_THRESHOLD {
             let input = self.inner.split_off(1);
             match SnapEncoder::new().compress_vec(&input) {
                 Ok(res) => {
-                    self.inner.unsplit(BytesMut::from(res));
+                    self.inner.extend_from_slice(&res);
                     self.set_compress_flag();
                 }
                 Err(e) => {
@@ -60,28 +64,45 @@ impl Message {
     }
 
     /// Decompress message
-    fn decompress(mut self) -> Result<Bytes, io::Error> {
+    pub(crate) fn decompress(mut self) -> Result<Bytes, io::Error> {
         if self.inner.is_empty() {
             Err(io::ErrorKind::InvalidData.into())
         } else if self.compress_flag() {
-            match SnapDecoder::new().decompress_vec(&self.inner[1..]) {
-                Ok(res) => Ok(Bytes::from(res)),
+            match decompress_len(&self.inner[1..]) {
+                Ok(decompressed_bytes_len) => {
+                    if decompressed_bytes_len > MAX_UNCOMPRESSED_LEN {
+                        debug!(
+                            "the maximum uncompressed bytes len limit is exceeded, limit: {}, len: {}",
+                            MAX_UNCOMPRESSED_LEN, decompressed_bytes_len
+                        );
+                        Err(io::ErrorKind::InvalidData.into())
+                    } else {
+                        let mut buf = vec![0; decompressed_bytes_len];
+                        match SnapDecoder::new().decompress(&self.inner[1..], &mut buf) {
+                            Ok(_) => Ok(buf.into()),
+                            Err(e) => {
+                                debug!("snappy decompress error: {:?}", e);
+                                Err(io::ErrorKind::InvalidData.into())
+                            }
+                        }
+                    }
+                }
                 Err(e) => {
-                    debug!("snappy decompress error: {:?}", e);
+                    debug!("snappy decompress_len error: {:?}", e);
                     Err(io::ErrorKind::InvalidData.into())
                 }
             }
         } else {
-            self.inner.split_to(1);
-            Ok(self.inner.take().freeze())
+            let _ = self.inner.split_to(1);
+            Ok(self.inner.freeze())
         }
     }
 
-    fn set_compress_flag(&mut self) {
+    pub(crate) fn set_compress_flag(&mut self) {
         self.inner[0] = COMPRESS_FLAG;
     }
 
-    fn compress_flag(&self) -> bool {
+    pub(crate) fn compress_flag(&self) -> bool {
         (self.inner[0] & COMPRESS_FLAG) != 0
     }
 }
@@ -94,35 +115,4 @@ pub fn compress(src: Bytes) -> Bytes {
 /// Decompress data
 pub fn decompress(src: BytesMut) -> Result<Bytes, io::Error> {
     Message::from_compressed(src).decompress()
-}
-
-#[cfg(test)]
-mod test {
-    use super::{Bytes, Message, COMPRESSION_SIZE_THRESHOLD};
-
-    #[test]
-    fn test_no_need_compress() {
-        let cmp_data = Message::from_raw(Bytes::from("1222")).compress();
-
-        let msg = Message::from_compressed(cmp_data.into());
-
-        assert!(!msg.compress_flag());
-
-        let demsg = msg.decompress().unwrap();
-
-        assert_eq!(Bytes::from("1222"), demsg)
-    }
-
-    #[test]
-    fn test_compress_and_decompress() {
-        let raw_data = Bytes::from(vec![1; COMPRESSION_SIZE_THRESHOLD + 1]);
-        let cmp_data = Message::from_raw(raw_data.clone()).compress();
-
-        let msg = Message::from_compressed(cmp_data.into());
-        assert!(msg.compress_flag());
-
-        let demsg = msg.decompress().unwrap();
-
-        assert_eq!(raw_data, demsg)
-    }
 }

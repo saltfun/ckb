@@ -1,8 +1,10 @@
-use crate::relayer::Relayer;
+use crate::relayer::{Relayer, MAX_RELAY_TXS_NUM_PER_BATCH};
+use crate::utils::send_message_to;
+use crate::{attempt, Status, StatusCode};
 use ckb_logger::debug_target;
 use ckb_network::{CKBProtocolContext, PeerIndex};
+use ckb_store::ChainStore;
 use ckb_types::{packed, prelude::*};
-use failure::Error as FailureError;
 use std::sync::Arc;
 
 pub struct GetBlockTransactionsProcess<'a> {
@@ -27,8 +29,27 @@ impl<'a> GetBlockTransactionsProcess<'a> {
         }
     }
 
-    pub fn execute(self) -> Result<(), FailureError> {
-        let snapshot = self.relayer.shared.snapshot();
+    #[allow(clippy::needless_collect)]
+    pub fn execute(self) -> Status {
+        let shared = self.relayer.shared();
+        {
+            let get_block_transactions = self.message;
+            if get_block_transactions.indexes().len() > MAX_RELAY_TXS_NUM_PER_BATCH {
+                return StatusCode::ProtocolMessageIsMalformed.with_context(format!(
+                    "Indexes count({}) > MAX_RELAY_TXS_NUM_PER_BATCH({})",
+                    get_block_transactions.indexes().len(),
+                    MAX_RELAY_TXS_NUM_PER_BATCH,
+                ));
+            }
+            if get_block_transactions.uncle_indexes().len() > shared.consensus().max_uncles_num() {
+                return StatusCode::ProtocolMessageIsMalformed.with_context(format!(
+                    "UncleIndexes count({}) > consensus max_uncles_num({})",
+                    get_block_transactions.uncle_indexes().len(),
+                    shared.consensus().max_uncles_num(),
+                ));
+            }
+        }
+
         let block_hash = self.message.block_hash().to_entity();
         debug_target!(
             crate::LOG_TARGET_RELAY,
@@ -36,7 +57,7 @@ impl<'a> GetBlockTransactionsProcess<'a> {
             block_hash
         );
 
-        if let Some(block) = snapshot.get_block(&block_hash) {
+        if let Some(block) = shared.store().get_block(&block_hash) {
             let transactions = self
                 .message
                 .indexes()
@@ -62,17 +83,10 @@ impl<'a> GetBlockTransactionsProcess<'a> {
                 .uncles(uncles.into_iter().map(|uncle| uncle.data()).pack())
                 .build();
             let message = packed::RelayMessage::new_builder().set(content).build();
-            let data = message.as_slice().into();
 
-            if let Err(err) = self.nc.send_message_to(self.peer, data) {
-                debug_target!(
-                    crate::LOG_TARGET_RELAY,
-                    "relayer send BlockTransactions error: {:?}",
-                    err
-                );
-            }
+            attempt!(send_message_to(self.nc.as_ref(), self.peer, &message));
         }
 
-        Ok(())
+        Status::ok()
     }
 }

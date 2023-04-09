@@ -1,18 +1,23 @@
 [package]
 name = "ckb-reward-calculator"
-version = "0.25.0-pre"
+version = "0.110.0-pre"
 license = "MIT"
 authors = ["Nervos Core Dev <dev@nervos.org>"]
-edition = "2018"
+edition = "2021"
+description = "TODO(doc): @keroro520 crate description"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
 
 [dependencies]
-ckb-types = { path = "../types" }
-ckb-store = { path = "../../store" }
-ckb-dao = { path = "../dao" }
-ckb-logger = { path = "../logger" }
-ckb-chain-spec = {path = "../../spec"}
-ckb-error = { path = "../../error" }
+ckb-types = { path = "../types", version = "= 0.110.0-pre" }
+ckb-store = { path = "../../store", version = "= 0.110.0-pre" }
+ckb-dao = { path = "../dao", version = "= 0.110.0-pre" }
+ckb-dao-utils = { path = "../dao/utils", version = "= 0.110.0-pre" }
+ckb-logger = { path = "../logger", version = "= 0.110.0-pre" }
+ckb-chain-spec = {path = "../../spec", version = "= 0.110.0-pre"}
 
 [dev-dependencies]
-ckb-db = { path = "../../db" }
-ckb-occupied-capacity = { path = "../occupied-capacity" }
+ckb-db = { path = "../../db", version = "= 0.110.0-pre" }
+ckb-occupied-capacity = { path = "../occupied-capacity", version = "= 0.110.0-pre" }
+ckb-db-schema = { path = "../../db-schema", version = "= 0.110.0-pre" }
+tempfile.workspace = true

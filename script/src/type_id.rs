@@ -1,5 +1,4 @@
 use crate::{ScriptError, ScriptGroup};
-use ckb_error::Error;
 use ckb_hash::new_blake2b;
 use ckb_types::{
     core::{cell::ResolvedTransaction, Cycle},
@@ -27,43 +26,42 @@ pub struct TypeIdSystemScript<'a> {
 }
 
 impl<'a> TypeIdSystemScript<'a> {
-    pub fn verify(&self) -> Result<Cycle, Error> {
+    pub fn verify(&self) -> Result<Cycle, ScriptError> {
         if self.max_cycles < TYPE_ID_CYCLES {
-            return Err(ScriptError::ExceededMaximumCycles.into());
+            return Err(ScriptError::ExceededMaximumCycles(self.max_cycles));
         }
         // TYPE_ID script should only accept one argument,
         // which is the hash of all inputs when creating
         // the cell.
         if self.script_group.script.args().len() != 32 {
-            return Err(ScriptError::ValidationFailure(ERROR_ARGS).into());
+            return Err(self.validation_failure(ERROR_ARGS));
         }
 
         // There could be at most one input cell and one
         // output cell with current TYPE_ID script.
         if self.script_group.input_indices.len() > 1 || self.script_group.output_indices.len() > 1 {
-            return Err(ScriptError::ValidationFailure(ERROR_TOO_MANY_CELLS).into());
+            return Err(self.validation_failure(ERROR_TOO_MANY_CELLS));
         }
 
         // If there's only one output cell with current
         // TYPE_ID script, we are creating such a cell,
         // we also need to validate that the first argument matches
         // the hash of following items concatenated:
-        // 1. Transaction hash of the first CellInput's OutPoint
-        // 2. Cell index of the first CellInput's OutPoint
-        // 3. Index of the first output cell in current script group.
+        // 1. First CellInput of the transaction.
+        // 2. Index of the first output cell in current script group.
         if self.script_group.input_indices.is_empty() {
             let first_cell_input = self
                 .rtx
                 .transaction
                 .inputs()
                 .get(0)
-                .ok_or(ScriptError::ValidationFailure(ERROR_ARGS))?;
+                .ok_or_else(|| self.validation_failure(ERROR_ARGS))?;
             let first_output_index: u64 = self
                 .script_group
                 .output_indices
-                .get(0)
+                .first()
                 .map(|output_index| *output_index as u64)
-                .ok_or(ScriptError::ValidationFailure(ERROR_ARGS))?;
+                .ok_or_else(|| self.validation_failure(ERROR_ARGS))?;
 
             let mut blake2b = new_blake2b();
             blake2b.update(first_cell_input.as_slice());
@@ -72,9 +70,13 @@ impl<'a> TypeIdSystemScript<'a> {
             blake2b.finalize(&mut ret);
 
             if ret[..] != self.script_group.script.args().raw_data()[..] {
-                return Err(ScriptError::ValidationFailure(ERROR_INVALID_INPUT_HASH).into());
+                return Err(self.validation_failure(ERROR_INVALID_INPUT_HASH));
             }
         }
         Ok(TYPE_ID_CYCLES)
+    }
+
+    fn validation_failure(&self, exit_code: i8) -> ScriptError {
+        ScriptError::validation_failure(&self.script_group.script, exit_code)
     }
 }

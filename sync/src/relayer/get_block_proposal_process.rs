@@ -1,8 +1,10 @@
-use crate::relayer::Relayer;
+use crate::relayer::{Relayer, MAX_RELAY_TXS_BYTES_PER_BATCH};
+use crate::utils::send_message_to;
+use crate::{attempt, Status, StatusCode};
 use ckb_logger::debug_target;
 use ckb_network::{CKBProtocolContext, PeerIndex};
 use ckb_types::{packed, prelude::*};
-use failure::Error as FailureError;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub struct GetBlockProposalProcess<'a> {
@@ -27,9 +29,27 @@ impl<'a> GetBlockProposalProcess<'a> {
         }
     }
 
-    pub fn execute(self) -> Result<(), FailureError> {
-        let proposals: Vec<packed::ProposalShortId> =
+    pub fn execute(self) -> Status {
+        let shared = self.relayer.shared();
+        let message_len = self.message.proposals().len();
+        {
+            // The block proposal request is separate from uncles,
+            // so here the limit is only used to calculate the maximum value of uncles
+            let limit = shared.consensus().max_block_proposals_limit()
+                * (shared.consensus().max_uncles_num() as u64);
+            if message_len as u64 > limit {
+                return StatusCode::ProtocolMessageIsMalformed.with_context(format!(
+                    "GetBlockProposal proposals count({message_len}) > consensus max_block_proposals_limit({limit})"
+                ));
+            }
+        }
+
+        let proposals: HashSet<packed::ProposalShortId> =
             self.message.proposals().to_entity().into_iter().collect();
+
+        if proposals.len() != message_len {
+            return StatusCode::RequestDuplicate.with_context("Request duplicate proposal");
+        }
 
         let fetched_transactions = {
             let tx_pool = self.relayer.shared.shared().tx_pool_controller();
@@ -40,38 +60,46 @@ impl<'a> GetBlockProposalProcess<'a> {
                     "relayer tx_pool_controller send fetch_txs error: {:?}",
                     e
                 );
-                return Ok(());
+                return Status::ok();
             }
             fetch_txs.unwrap()
         };
-        let fresh_proposals: Vec<packed::ProposalShortId> = proposals
+        // Transactions that do not exist on this node
+        let not_exist_proposals: Vec<packed::ProposalShortId> = proposals
             .into_iter()
-            .filter(|short_id| fetched_transactions.get(&short_id).is_none())
+            .filter(|short_id| !fetched_transactions.contains_key(short_id))
             .collect();
 
+        // Cache request, try process on timer
         self.relayer
             .shared()
             .state()
-            .insert_get_block_proposals(self.peer, fresh_proposals);
+            .insert_get_block_proposals(self.peer, not_exist_proposals);
 
+        let mut relay_bytes = 0;
+        let mut relay_proposals = Vec::new();
+        for (_, tx) in fetched_transactions {
+            let data = tx.data();
+            let tx_size = data.total_size();
+            if relay_bytes + tx_size > MAX_RELAY_TXS_BYTES_PER_BATCH {
+                self.send_block_proposals(std::mem::take(&mut relay_proposals));
+                relay_bytes = tx_size;
+            } else {
+                relay_bytes += tx_size;
+            }
+            relay_proposals.push(data);
+        }
+        if !relay_proposals.is_empty() {
+            attempt!(self.send_block_proposals(relay_proposals));
+        }
+        Status::ok()
+    }
+
+    fn send_block_proposals(&self, txs: Vec<packed::Transaction>) -> Status {
         let content = packed::BlockProposal::new_builder()
-            .transactions(
-                fetched_transactions
-                    .into_iter()
-                    .map(|(_, tx)| tx.data())
-                    .pack(),
-            )
+            .transactions(txs.into_iter().pack())
             .build();
         let message = packed::RelayMessage::new_builder().set(content).build();
-        let data = message.as_slice().into();
-
-        if let Err(err) = self.nc.send_message_to(self.peer, data) {
-            debug_target!(
-                crate::LOG_TARGET_RELAY,
-                "relayer send GetBlockProposal error: {:?}",
-                err
-            );
-        }
-        Ok(())
+        send_message_to(self.nc.as_ref(), self.peer, &message)
     }
 }

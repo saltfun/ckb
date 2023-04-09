@@ -3,7 +3,6 @@ use ckb_jsonrpc_types::BlockView as JsonBlock;
 use ckb_types::core;
 #[cfg(feature = "progress_bar")]
 use indicatif::{ProgressBar, ProgressStyle};
-use serde_json;
 use std::error::Error;
 use std::fs;
 use std::io;
@@ -19,10 +18,12 @@ pub struct Import {
 }
 
 impl Import {
+    /// Creates a new import job.
     pub fn new(chain: ChainController, source: PathBuf) -> Self {
         Import { chain, source }
     }
 
+    /// Executes the import job.
     pub fn execute(self) -> Result<(), Box<dyn Error>> {
         self.read_from_json()
     }
@@ -45,12 +46,13 @@ impl Import {
         Ok(())
     }
 
+    /// Imports the chain from the JSON file.
     #[cfg(feature = "progress_bar")]
     pub fn read_from_json(&self) -> Result<(), Box<dyn Error>> {
         let metadata = fs::metadata(&self.source)?;
         let f = fs::File::open(&self.source)?;
         let reader = io::BufReader::new(f);
-        let progress_bar = ProgressBar::new(metadata.len() as u64);
+        let progress_bar = ProgressBar::new(metadata.len());
         progress_bar.set_style(
             ProgressStyle::default_bar()
                 .template("[{elapsed_precise}] {bar:50.cyan/blue} {bytes:>6}/{total_bytes:6} {msg}")

@@ -1,8 +1,10 @@
-use crate::relayer::Relayer;
+use crate::relayer::{Relayer, MAX_RELAY_TXS_BYTES_PER_BATCH, MAX_RELAY_TXS_NUM_PER_BATCH};
+use crate::utils::send_message_to;
+use crate::{attempt, Status, StatusCode};
 use ckb_logger::{debug_target, trace_target};
 use ckb_network::{CKBProtocolContext, PeerIndex};
 use ckb_types::{packed, prelude::*};
-use failure::Error as FailureError;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub struct GetTransactionsProcess<'a> {
@@ -27,7 +29,16 @@ impl<'a> GetTransactionsProcess<'a> {
         }
     }
 
-    pub fn execute(self) -> Result<(), FailureError> {
+    pub fn execute(self) -> Status {
+        let message_len = self.message.tx_hashes().len();
+        {
+            if message_len > MAX_RELAY_TXS_NUM_PER_BATCH {
+                return StatusCode::ProtocolMessageIsMalformed.with_context(format!(
+                    "TxHashes count({message_len}) > MAX_RELAY_TXS_NUM_PER_BATCH({MAX_RELAY_TXS_NUM_PER_BATCH})",
+                ));
+            }
+        }
+
         let tx_hashes = self.message.tx_hashes();
 
         trace_target!(
@@ -40,12 +51,16 @@ impl<'a> GetTransactionsProcess<'a> {
         let transactions: Vec<_> = {
             let tx_pool = self.relayer.shared.shared().tx_pool_controller();
 
-            let fetch_txs_with_cycles = tx_pool.fetch_txs_with_cycles(
-                tx_hashes
-                    .iter()
-                    .map(|tx_hash| packed::ProposalShortId::from_tx_hash(&tx_hash.to_entity()))
-                    .collect(),
-            );
+            let tx_hashes_set: HashSet<_> = tx_hashes
+                .iter()
+                .map(|tx_hash| packed::ProposalShortId::from_tx_hash(&tx_hash.to_entity()))
+                .collect();
+
+            if message_len != tx_hashes_set.len() {
+                return StatusCode::RequestDuplicate.with_context("Request duplicate transaction");
+            }
+
+            let fetch_txs_with_cycles = tx_pool.fetch_txs_with_cycles(tx_hashes_set);
 
             if let Err(e) = fetch_txs_with_cycles {
                 debug_target!(
@@ -53,7 +68,7 @@ impl<'a> GetTransactionsProcess<'a> {
                     "relayer tx_pool_controller send fetch_txs_with_cycles error: {:?}",
                     e,
                 );
-                return Ok(());
+                return Status::ok();
             };
 
             fetch_txs_with_cycles
@@ -69,19 +84,32 @@ impl<'a> GetTransactionsProcess<'a> {
         };
 
         if !transactions.is_empty() {
-            let txs = packed::RelayTransactions::new_builder()
-                .transactions(transactions.pack())
-                .build();
-            let message = packed::RelayMessage::new_builder().set(txs).build();
-            let data = message.as_slice().into();
-            if let Err(err) = self.nc.send_message_to(self.peer, data) {
-                debug_target!(
-                    crate::LOG_TARGET_RELAY,
-                    "relayer send Transactions error: {:?}",
-                    err,
-                );
+            let mut relay_bytes = 0;
+            let mut relay_txs = Vec::new();
+            for tx in transactions {
+                if relay_bytes + tx.total_size() > MAX_RELAY_TXS_BYTES_PER_BATCH {
+                    self.send_relay_transactions(std::mem::take(&mut relay_txs));
+                    relay_bytes = tx.total_size();
+                } else {
+                    relay_bytes += tx.total_size();
+                }
+                relay_txs.push(tx);
+            }
+            if !relay_txs.is_empty() {
+                attempt!(self.send_relay_transactions(relay_txs));
             }
         }
-        Ok(())
+        Status::ok()
+    }
+
+    fn send_relay_transactions(&self, txs: Vec<packed::RelayTransaction>) -> Status {
+        let message = packed::RelayMessage::new_builder()
+            .set(
+                packed::RelayTransactions::new_builder()
+                    .transactions(packed::RelayTransactionVec::new_builder().set(txs).build())
+                    .build(),
+            )
+            .build();
+        send_message_to(self.nc.as_ref(), self.peer, &message)
     }
 }
